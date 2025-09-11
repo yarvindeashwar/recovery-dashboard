@@ -68,11 +68,10 @@ def init_bigquery_client():
     try:
         # Try to use Streamlit secrets first (for cloud deployment)
         if 'gcp_credentials' in st.secrets:
+            import os
             credentials_dict = dict(st.secrets["gcp_credentials"])
             
             # Create credentials from the dictionary
-            from google.auth import credentials as auth_credentials
-            from google.auth.transport.requests import Request
             from google.oauth2.credentials import Credentials
             
             credentials = Credentials(
@@ -83,8 +82,8 @@ def init_bigquery_client():
                 client_secret=credentials_dict.get("client_secret")
             )
             
-            # Refresh the token
-            credentials.refresh(Request())
+            # Set environment variable to avoid metadata server lookup
+            os.environ['GOOGLE_AUTH_DISABLE_METADATA_SERVER'] = 'True'
             
             client = bigquery.Client(project=PROJECT_ID, credentials=credentials)
         else:
@@ -100,6 +99,20 @@ def init_bigquery_client():
 # ============================================
 # DATA QUERIES
 # ============================================
+
+def get_credentials():
+    """Get credentials for pandas_gbq queries"""
+    if 'gcp_credentials' in st.secrets:
+        credentials_dict = dict(st.secrets["gcp_credentials"])
+        from google.oauth2.credentials import Credentials
+        return Credentials(
+            token=None,
+            refresh_token=credentials_dict.get("refresh_token"),
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=credentials_dict.get("client_id"),
+            client_secret=credentials_dict.get("client_secret")
+        )
+    return None
 
 @st.cache_data(ttl=3600)  # Cache for 1 hour
 def get_monthly_performance(days_back=90):
@@ -135,7 +148,9 @@ def get_monthly_performance(days_back=90):
     ORDER BY month DESC, total_recovered DESC
     """
     
-    df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID)
+    credentials = get_credentials()
+    df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
+    
     df['month'] = pd.to_datetime(df['month'])
     return df
 
@@ -178,7 +193,8 @@ def get_platform_performance():
     ORDER BY actual_recovery DESC
     """
     
-    return pandas_gbq.read_gbq(query, project_id=PROJECT_ID)
+    credentials = get_credentials()
+    return pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
 
 @st.cache_data(ttl=3600)
 def get_location_profitability():
@@ -208,7 +224,8 @@ def get_location_profitability():
     FROM location_recovery
     """
     
-    return pandas_gbq.read_gbq(query, project_id=PROJECT_ID)
+    credentials = get_credentials()
+    return pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
 
 @st.cache_data(ttl=3600)
 def get_daily_trend(days=30):
@@ -226,7 +243,8 @@ def get_daily_trend(days=30):
     ORDER BY 1 DESC
     """
     
-    df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID)
+    credentials = get_credentials()
+    df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
     df['chargeback_date'] = pd.to_datetime(df['chargeback_date'])
     return df
 
@@ -268,7 +286,8 @@ def get_top_chains():
     LIMIT 20
     """
     
-    return pandas_gbq.read_gbq(query, project_id=PROJECT_ID)
+    credentials = get_credentials()
+    return pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
 
 # ============================================
 # DASHBOARD LAYOUT
