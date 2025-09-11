@@ -13,10 +13,17 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
+import json
+import os
+
+# Disable metadata server to avoid timeout in cloud environments
+os.environ['GOOGLE_AUTH_DISABLE_METADATA_SERVER'] = 'True'
+os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = ''  # Clear any default
+
 from google.cloud import bigquery
 import pandas_gbq
-import json
 from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
 
 # ============================================
 # CONFIGURATION
@@ -68,12 +75,9 @@ def init_bigquery_client():
     try:
         # Try to use Streamlit secrets first (for cloud deployment)
         if 'gcp_credentials' in st.secrets:
-            import os
             credentials_dict = dict(st.secrets["gcp_credentials"])
             
             # Create credentials from the dictionary
-            from google.oauth2.credentials import Credentials
-            
             credentials = Credentials(
                 token=None,
                 refresh_token=credentials_dict.get("refresh_token"),
@@ -81,9 +85,6 @@ def init_bigquery_client():
                 client_id=credentials_dict.get("client_id"),
                 client_secret=credentials_dict.get("client_secret")
             )
-            
-            # Set environment variable to avoid metadata server lookup
-            os.environ['GOOGLE_AUTH_DISABLE_METADATA_SERVER'] = 'True'
             
             client = bigquery.Client(project=PROJECT_ID, credentials=credentials)
         else:
@@ -104,7 +105,6 @@ def get_credentials():
     """Get credentials for pandas_gbq queries"""
     if 'gcp_credentials' in st.secrets:
         credentials_dict = dict(st.secrets["gcp_credentials"])
-        from google.oauth2.credentials import Credentials
         return Credentials(
             token=None,
             refresh_token=credentials_dict.get("refresh_token"),
