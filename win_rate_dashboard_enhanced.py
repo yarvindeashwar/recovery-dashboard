@@ -9,10 +9,20 @@ import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, date, timedelta
 import os
+import json
+from google.oauth2 import service_account
 
-# Disable metadata server to avoid timeout
-os.environ['GOOGLE_AUTH_DISABLE_METADATA_SERVER'] = 'True'
-os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = ''
+# Handle authentication for both local and Streamlit Cloud
+if 'gcp_service_account' in st.secrets:
+    # Running on Streamlit Cloud - use secrets
+    credentials = service_account.Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"]
+    )
+else:
+    # Running locally - disable metadata server
+    os.environ['GOOGLE_AUTH_DISABLE_METADATA_SERVER'] = 'True'
+    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = ''
+    credentials = None
 
 from google.cloud import bigquery
 import pandas_gbq
@@ -126,7 +136,7 @@ def get_chains_list():
     LIMIT 500
     """
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
         return df['chain'].tolist()
     except:
         return []
@@ -169,7 +179,7 @@ def get_category_subcategory_breakdown(start_date, end_date, platforms, chain_se
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
         return df
     except Exception as e:
         st.error(f"Error: {e}")
@@ -235,7 +245,7 @@ def get_win_rate_trend(start_date, end_date, aggregation, platforms, chain_searc
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
         df['period'] = pd.to_datetime(df['period'])
         return df
     except Exception as e:
@@ -286,7 +296,7 @@ def get_platform_trend(start_date, end_date, aggregation, platforms, chain_searc
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
         df['period'] = pd.to_datetime(df['period'])
         return df
     except Exception as e:
@@ -348,7 +358,7 @@ def get_issue_type_trend(start_date, end_date, aggregation, platforms, chain_sea
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
         df['period'] = pd.to_datetime(df['period'])
         return df
     except Exception as e:
@@ -388,7 +398,7 @@ def get_summary_metrics(start_date, end_date, platforms, chain_search, categorie
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
         return df
     except Exception as e:
         st.error(f"Error: {e}")
@@ -432,7 +442,7 @@ def get_chain_win_rates(start_date, end_date, platforms=None, categories=None, m
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
         return df
     except Exception as e:
         st.error(f"Error loading chain data: {e}")
@@ -475,7 +485,7 @@ def get_chain_platform_matrix(start_date, end_date, top_n_chains=15):
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
         return df
     except Exception as e:
         st.error(f"Error loading chain-platform data: {e}")
@@ -529,7 +539,7 @@ def get_chain_issue_type_breakdown(start_date, end_date, top_n_chains=15):
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
         return df
     except Exception as e:
         st.error(f"Error loading chain-issue data: {e}")
@@ -576,7 +586,7 @@ def get_chain_recovery_per_location(start_date, end_date, top_n_chains=10):
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
         df['month'] = pd.to_datetime(df['month'])
         return df
     except Exception as e:
@@ -616,7 +626,7 @@ def get_chain_trend(start_date, end_date, selected_chains, aggregation="Daily"):
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
         df['period'] = pd.to_datetime(df['period'])
         return df
     except Exception as e:
