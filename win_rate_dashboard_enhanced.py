@@ -897,10 +897,15 @@ def main():
             st.plotly_chart(fig, use_container_width=True)
         
         with col2:
-            # Metrics for top chains
-            st.metric("Top Chain Win Rate", f"{chain_df.iloc[0]['win_rate']:.1f}%", 
-                     f"{chain_df.iloc[0]['chain']}")
-            st.metric("Average Win Rate", f"{chain_df['win_rate'].mean():.1f}%")
+            # Metrics for top chains - sort by win rate to get the actual top performer
+            top_chain = chain_df.nlargest(1, 'win_rate').iloc[0]
+            st.metric("Top Chain Win Rate", f"{top_chain['win_rate']:.1f}%", 
+                     f"{top_chain['chain']}")
+            # Calculate weighted average win rate (not simple mean)
+            total_accepted = chain_df['accepted'].sum()
+            total_settled = chain_df['total_settled'].sum()
+            weighted_avg = (total_accepted / total_settled * 100) if total_settled > 0 else 0
+            st.metric("Overall Win Rate", f"{weighted_avg:.1f}%")
             st.metric("Total Chains", f"{len(chain_df):,}")
             
             # Volume distribution
