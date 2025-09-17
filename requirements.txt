@@ -4,3 +4,4 @@ plotly==6.3.0
 google-cloud-bigquery==3.37.0
 pandas-gbq==0.29.2
 pydata-google-auth==1.9.1
+matplotlib==3.9.2
