@@ -78,7 +78,7 @@ def get_platforms():
     ORDER BY platform
     """
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials, auth_local_webserver=False)
         return df['platform'].tolist()
     except:
         return []
@@ -96,7 +96,7 @@ def get_chains():
     ORDER BY sm.chain
     """
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials, auth_local_webserver=False)
         return df['chain'].tolist()
     except:
         return []
@@ -241,7 +241,7 @@ def get_overall_recovery(date_range, platform_filter, chain_filter):
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials, auth_local_webserver=False)
         if not df.empty:
             row = df.iloc[0]
             # Calculate lost as Settled - Won
@@ -302,7 +302,7 @@ def get_monthly_recovery(date_range, platform_filter, chain_filter):
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials, auth_local_webserver=False)
         df['month'] = pd.to_datetime(df['month'])
         df['month_name'] = df['month'].dt.strftime('%B %Y')
         
@@ -357,7 +357,7 @@ def get_platform_recovery(date_range, platform_filter, chain_filter):
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials, auth_local_webserver=False)
         
         # Calculate lost as Settled - Won
         df['lost'] = df['settled'] - df['won']
@@ -451,7 +451,7 @@ def get_chain_recovery(date_range, platform_filter, chain_filter):
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials, auth_local_webserver=False)
         
         # Calculate lost as Settled - Won
         df['lost'] = df['settled'] - df['won']
@@ -527,7 +527,7 @@ def get_platform_win_rate_trend(date_range, platform_filter=None, chain_filter=N
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials, auth_local_webserver=False)
         if not df.empty:
             df['month'] = pd.to_datetime(df['month'])
             df['month_str'] = df['month'].dt.strftime('%b %Y')
@@ -588,7 +588,7 @@ def get_subcategory_recovery(date_range, platform_filter, chain_filter):
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials, auth_local_webserver=False)
         return df
     except Exception as e:
         st.error(f"Error loading subcategory recovery: {e}")
@@ -621,7 +621,7 @@ def get_status_breakdown(date_range, platform_filter, chain_filter):
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials, auth_local_webserver=False)
         return df
     except Exception as e:
         st.error(f"Error loading status breakdown: {e}")
@@ -695,7 +695,7 @@ def get_cohort_analysis(date_range, platform_filter=None, chain_filter=None):
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials, auth_local_webserver=False)
         
         if not df.empty:
             # Pivot the data to create cohort matrix
@@ -802,7 +802,7 @@ def get_ontime_dispute_analysis(date_range, platform_filter, chain_filter):
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials, auth_local_webserver=False)
         return df
     except Exception as e:
         st.error(f"Error loading on-time dispute analysis: {e}")
@@ -871,7 +871,7 @@ def get_expiry_analysis(date_range, platform_filter, chain_filter):
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials, auth_local_webserver=False)
         return df
     except Exception as e:
         st.error(f"Error loading expiry analysis: {e}")
@@ -979,7 +979,7 @@ def get_chains_requiring_attention(date_range, platform_filter=None, chain_filte
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials, auth_local_webserver=False)
         return df
     except Exception as e:
         st.error(f"Error loading attention-required chains: {str(e)}")
@@ -1061,7 +1061,7 @@ def get_win_rate_cohort(date_range, platform_filter=None, chain_filter=None):
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials, auth_local_webserver=False)
         
         if not df.empty:
             # Pivot the data to create win rate matrix
