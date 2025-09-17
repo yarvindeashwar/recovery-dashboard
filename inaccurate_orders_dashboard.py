@@ -258,46 +258,77 @@ def get_overall_recovery(date_range, platform_filter, chain_filter):
 
 @st.cache_data(ttl=3600)
 def get_monthly_recovery(date_range, platform_filter, chain_filter):
-    """Get monthly recovery trends for inaccurate orders"""
-    filter_clause = build_filter_clause(date_range, platform_filter, chain_filter, 'cs', include_chain=False)
+    """Get monthly recovery trends using CORRECT calculation:
+    Won = ALL error categories, Settled = INACCURATE only"""
+    
+    # Build filters that apply to both queries
+    filters = []
+    
+    if date_range and len(date_range) == 2:
+        filters.append(f"cs.chargeback_date BETWEEN '{date_range[0]}' AND '{date_range[1]}'")
+    
+    if platform_filter and platform_filter != ["All Platforms"] and platform_filter != "All Platforms":
+        if isinstance(platform_filter, list):
+            platform_list = "', '".join(platform_filter)
+        else:
+            platform_list = platform_filter
+        filters.append(f"cs.platform IN ('{platform_list}')")
+    
+    base_where = " AND ".join(filters) if filters else "1=1"
     
     query = f"""
+    WITH monthly_data AS (
+        SELECT 
+            DATE_TRUNC(cs.chargeback_date, MONTH) as month,
+            
+            -- Won from ALL categories
+            SUM(COALESCE(cs.enabled_won_disputes, 0)) as won_all,
+            
+            -- Settled, pending, contested from INACCURATE only
+            SUM(CASE 
+                WHEN UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%' 
+                    AND cs.external_status IN ('ACCEPTED', 'DENIED')
+                THEN COALESCE(cs.enabled_customer_refunds, 0)
+                ELSE 0 
+            END) as settled,
+            
+            SUM(CASE 
+                WHEN UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%' 
+                    AND cs.external_status = 'TO_BE_RAISED'
+                THEN COALESCE(cs.enabled_customer_refunds, 0)
+                WHEN UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%' 
+                    AND cs.external_status = 'IN_PROGRESS' AND cs.loop_raised = true
+                THEN COALESCE(cs.enabled_customer_refunds, 0)
+                ELSE 0 
+            END) as pending,
+            
+            SUM(CASE 
+                WHEN UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%' 
+                    AND cs.external_status IN ('ACCEPTED', 'TO_BE_RAISED') 
+                THEN COALESCE(cs.enabled_customer_refunds, 0)
+                WHEN UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%' 
+                    AND cs.external_status IN ('IN_PROGRESS', 'DENIED') AND cs.loop_raised = true
+                THEN COALESCE(cs.enabled_customer_refunds, 0)
+                ELSE 0 
+            END) as total_contested,
+            
+            COUNT(CASE 
+                WHEN UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%' 
+                THEN 1 ELSE NULL 
+            END) as dispute_count
+            
+        FROM `merchant_portal_export.chargeback_split_summary` cs
+        WHERE {base_where}
+        GROUP BY month
+    )
     SELECT 
-        DATE_TRUNC(chargeback_date, MONTH) as month,
-        
-        -- Total disputed amount for the month
-        SUM(CASE 
-            WHEN external_status IN ('ACCEPTED', 'TO_BE_RAISED') 
-            THEN COALESCE(enabled_customer_refunds, 0)
-            WHEN external_status IN ('IN_PROGRESS', 'DENIED') AND loop_raised = true
-            THEN COALESCE(enabled_customer_refunds, 0)
-            ELSE 0 
-        END) as total_contested,
-        
-        -- Amount won
-        SUM(COALESCE(enabled_won_disputes, 0)) as won,
-        
-        -- Amount settled
-        SUM(CASE 
-            WHEN external_status IN ('ACCEPTED', 'DENIED')
-            THEN COALESCE(enabled_customer_refunds, 0)
-            ELSE 0 
-        END) as settled,
-        
-        -- Amount pending
-        SUM(CASE 
-            WHEN external_status = 'TO_BE_RAISED'
-            THEN COALESCE(enabled_customer_refunds, 0)
-            WHEN external_status = 'IN_PROGRESS' AND loop_raised = true
-            THEN COALESCE(enabled_customer_refunds, 0)
-            ELSE 0 
-        END) as pending,
-        
-        COUNT(*) as dispute_count
-        
-    FROM `merchant_portal_export.chargeback_split_summary` cs
-    WHERE {filter_clause}
-    GROUP BY month
+        month,
+        won_all as won,
+        settled,
+        pending,
+        total_contested,
+        dispute_count
+    FROM monthly_data
     ORDER BY month
     """
     
@@ -321,38 +352,70 @@ def get_monthly_recovery(date_range, platform_filter, chain_filter):
 
 @st.cache_data(ttl=3600)
 def get_platform_recovery(date_range, platform_filter, chain_filter):
-    """Get recovery by platform for inaccurate orders"""
-    filter_clause = build_filter_clause(date_range, platform_filter, chain_filter, 'cs', include_chain=False)
+    """Get recovery by platform using CORRECT calculation:
+    Won = ALL error categories, Settled = INACCURATE only"""
+    
+    # Build filters that apply to both queries
+    filters = []
+    
+    if date_range and len(date_range) == 2:
+        filters.append(f"cs.chargeback_date BETWEEN '{date_range[0]}' AND '{date_range[1]}'")
+    
+    if platform_filter and platform_filter != ["All Platforms"] and platform_filter != "All Platforms":
+        if isinstance(platform_filter, list):
+            platform_list = "', '".join(platform_filter)
+        else:
+            platform_list = platform_filter
+        filters.append(f"cs.platform IN ('{platform_list}')")
+    
+    base_where = " AND ".join(filters) if filters else "1=1"
     
     query = f"""
+    WITH platform_data AS (
+        SELECT 
+            cs.platform,
+            
+            -- Won from ALL categories
+            SUM(COALESCE(cs.enabled_won_disputes, 0)) as won_all,
+            
+            -- Total contested, settled, pending from INACCURATE only
+            SUM(CASE 
+                WHEN UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%'
+                THEN COALESCE(cs.enabled_customer_refunds, 0)
+                ELSE 0 
+            END) as total_contested,
+            
+            SUM(CASE 
+                WHEN UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%'
+                    AND cs.external_status IN ('ACCEPTED', 'DENIED')
+                THEN COALESCE(cs.enabled_customer_refunds, 0)
+                ELSE 0 
+            END) as settled,
+            
+            SUM(CASE 
+                WHEN UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%'
+                    AND cs.external_status NOT IN ('ACCEPTED', 'DENIED')
+                THEN COALESCE(cs.customer_refunds, 0)
+                ELSE 0 
+            END) as pending,
+            
+            COUNT(CASE 
+                WHEN UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%' 
+                THEN 1 ELSE NULL 
+            END) as dispute_count
+            
+        FROM `merchant_portal_export.chargeback_split_summary` cs
+        WHERE {base_where}
+        GROUP BY cs.platform
+    )
     SELECT 
         platform,
-        
-        -- Total disputed amount
-        SUM(COALESCE(enabled_customer_refunds, 0)) as total_contested,
-        
-        -- Amount won
-        SUM(COALESCE(enabled_won_disputes, 0)) as won,
-        
-        -- Amount settled
-        SUM(CASE 
-            WHEN external_status IN ('ACCEPTED', 'DENIED')
-            THEN COALESCE(enabled_customer_refunds, 0)
-            ELSE 0 
-        END) as settled,
-        
-        -- Amount pending (not ACCEPTED or DENIED)
-        SUM(CASE 
-            WHEN external_status NOT IN ('ACCEPTED', 'DENIED')
-            THEN COALESCE(customer_refunds, 0)
-            ELSE 0 
-        END) as pending,
-        
-        COUNT(*) as dispute_count
-        
-    FROM `merchant_portal_export.chargeback_split_summary` cs
-    WHERE {filter_clause}
-    GROUP BY platform
+        total_contested,
+        won_all as won,
+        settled,
+        pending,
+        dispute_count
+    FROM platform_data
     ORDER BY total_contested DESC
     """
     
@@ -538,7 +601,8 @@ def get_platform_win_rate_trend(date_range, platform_filter=None, chain_filter=N
 
 @st.cache_data(ttl=3600)
 def get_subcategory_recovery(date_range, platform_filter, chain_filter):
-    """Get recovery rate by subcategory for inaccurate orders"""
+    """Get recovery rate by subcategory using CORRECT calculation:
+    Won = ALL error categories, Settled = INACCURATE only"""
     
     # Build filters manually to avoid parsing issues
     filters = []
@@ -557,31 +621,44 @@ def get_subcategory_recovery(date_range, platform_filter, chain_filter):
         chain_list = "', '".join(chain_filter)
         filters.append(f"sm.chain IN ('{chain_list}')")
     
-    # Add inaccurate filter
-    filters.append("UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%'")
-    
-    where_clause = " AND ".join(filters) if filters else "1=1"
+    base_where = " AND ".join(filters) if filters else "1=1"
     
     query = f"""
-    SELECT 
-        COALESCE(cs.error_subcategory, 'Unspecified') as subcategory,
-        SUM(COALESCE(cs.enabled_won_disputes, 0)) as won,
-        SUM(CASE 
-            WHEN cs.external_status IN ('ACCEPTED', 'DENIED')
-            THEN COALESCE(cs.enabled_customer_refunds, 0)
-            ELSE 0 
-        END) as settled,
-        ROUND(100.0 * SUM(COALESCE(cs.enabled_won_disputes, 0)) / 
-            NULLIF(SUM(CASE 
-                WHEN cs.external_status IN ('ACCEPTED', 'DENIED')
+    WITH subcategory_data AS (
+        SELECT 
+            CASE 
+                WHEN UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%'
+                THEN COALESCE(cs.error_subcategory, 'Unspecified')
+                ELSE NULL
+            END as subcategory,
+            
+            -- Won from ALL categories
+            COALESCE(cs.enabled_won_disputes, 0) as won_amount,
+            
+            -- Settled from INACCURATE only
+            CASE 
+                WHEN UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%'
+                    AND cs.external_status IN ('ACCEPTED', 'DENIED')
                 THEN COALESCE(cs.enabled_customer_refunds, 0)
                 ELSE 0 
-            END), 0), 1) as win_rate,
-        COUNT(DISTINCT cs.slug) as location_count,
-        COUNT(*) as dispute_count
-    FROM `merchant_portal_export.chargeback_split_summary` cs
-    {chain_join}
-    WHERE {where_clause}
+            END as settled_amount,
+            
+            cs.slug,
+            UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%' as is_inaccurate
+            
+        FROM `merchant_portal_export.chargeback_split_summary` cs
+        {chain_join}
+        WHERE {base_where}
+    )
+    SELECT 
+        subcategory,
+        SUM(won_amount) as won,
+        SUM(settled_amount) as settled,
+        ROUND(100.0 * SUM(won_amount) / NULLIF(SUM(settled_amount), 0), 1) as win_rate,
+        COUNT(DISTINCT CASE WHEN is_inaccurate THEN slug ELSE NULL END) as location_count,
+        SUM(CASE WHEN is_inaccurate THEN 1 ELSE 0 END) as dispute_count
+    FROM subcategory_data
+    WHERE subcategory IS NOT NULL
     GROUP BY subcategory
     HAVING settled > 0
     ORDER BY settled DESC
@@ -592,6 +669,148 @@ def get_subcategory_recovery(date_range, platform_filter, chain_filter):
         return df
     except Exception as e:
         st.error(f"Error loading subcategory recovery: {e}")
+        return pd.DataFrame()
+
+@st.cache_data(ttl=3600)
+def get_subcategory_recovery_monthly(date_range, platform_filter, chain_filter):
+    """Get monthly recovery rate by subcategory using CORRECT calculation:
+    Won = ALL error categories, Settled = INACCURATE only"""
+    
+    # Build filters manually to avoid parsing issues
+    filters = []
+    
+    if date_range and len(date_range) == 2:
+        filters.append(f"cs.chargeback_date BETWEEN '{date_range[0]}' AND '{date_range[1]}'")
+    
+    if platform_filter and "All Platforms" not in platform_filter:
+        platform_list = "', '".join(platform_filter)
+        filters.append(f"cs.platform IN ('{platform_list}')")
+    
+    # Handle chain filter with join
+    chain_join = ""
+    if chain_filter and "All Chains" not in chain_filter:
+        chain_join = "JOIN `restaurant_aggregate_metrics.slug_am_mapping` sm ON cs.slug = sm.slug"
+        chain_list = "', '".join(chain_filter)
+        filters.append(f"sm.chain IN ('{chain_list}')")
+    
+    base_where = " AND ".join(filters) if filters else "1=1"
+    
+    query = f"""
+    WITH monthly_subcategory_data AS (
+        SELECT 
+            DATE_TRUNC(cs.chargeback_date, MONTH) as month,
+            CASE 
+                WHEN UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%'
+                THEN COALESCE(cs.error_subcategory, 'Unspecified')
+                ELSE NULL
+            END as subcategory,
+            
+            -- Won from ALL categories
+            COALESCE(cs.enabled_won_disputes, 0) as won_amount,
+            
+            -- Settled from INACCURATE only
+            CASE 
+                WHEN UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%'
+                    AND cs.external_status IN ('ACCEPTED', 'DENIED')
+                THEN COALESCE(cs.enabled_customer_refunds, 0)
+                ELSE 0 
+            END as settled_amount,
+            
+            UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%' as is_inaccurate
+            
+        FROM `merchant_portal_export.chargeback_split_summary` cs
+        {chain_join}
+        WHERE {base_where}
+    )
+    SELECT 
+        month,
+        subcategory,
+        SUM(won_amount) as won,
+        SUM(settled_amount) as settled,
+        ROUND(100.0 * SUM(won_amount) / NULLIF(SUM(settled_amount), 0), 1) as win_rate,
+        SUM(CASE WHEN is_inaccurate THEN 1 ELSE 0 END) as dispute_count
+    FROM monthly_subcategory_data
+    WHERE subcategory IS NOT NULL
+    GROUP BY month, subcategory
+    HAVING settled > 0
+    ORDER BY subcategory, month ASC
+    """
+    
+    try:
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials, auth_local_webserver=False)
+        return df
+    except Exception as e:
+        st.error(f"Error loading monthly subcategory recovery: {e}")
+        return pd.DataFrame()
+
+@st.cache_data(ttl=3600)
+def get_subcategory_volume_monthly(date_range, platform_filter, chain_filter):
+    """Get monthly dispute volume percentage by subcategory for inaccurate orders"""
+    
+    # Build filters manually to avoid parsing issues
+    filters = []
+    
+    if platform_filter and "All Platforms" not in platform_filter:
+        platform_list = [f"'{p}'" for p in platform_filter]
+        filters.append(f"cs.platform IN ({', '.join(platform_list)})")
+    
+    if chain_filter and "All Chains" not in chain_filter:
+        chain_list = [f"'{c}'" for c in chain_filter]
+        filters.append(f"sm.chain IN ({', '.join(chain_list)})")
+    
+    # Add date range filter
+    start_date, end_date = date_range
+    filters.append(f"cs.chargeback_date >= '{start_date}'")
+    filters.append(f"cs.chargeback_date <= '{end_date}'")
+    
+    # Add inaccurate order filter
+    filters.append("UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%'")
+    
+    where_clause = " AND ".join(filters)
+    
+    # Chain join if needed
+    chain_join = ""
+    if chain_filter and "All Chains" not in chain_filter:
+        chain_join = "LEFT JOIN `restaurant_aggregate_metrics.slug_am_mapping` sm ON cs.slug = sm.slug"
+    
+    query = f"""
+    WITH monthly_totals AS (
+        SELECT 
+            DATE_TRUNC(cs.chargeback_date, MONTH) as month,
+            COUNT(*) as total_disputes_month
+        FROM `merchant_portal_export.chargeback_split_summary` cs
+        {chain_join}
+        WHERE {where_clause}
+        GROUP BY month
+    ),
+    subcategory_monthly AS (
+        SELECT 
+            DATE_TRUNC(cs.chargeback_date, MONTH) as month,
+            TRIM(UPPER(cs.error_subcategory)) as subcategory,
+            COUNT(*) as disputes_count
+        FROM `merchant_portal_export.chargeback_split_summary` cs
+        {chain_join}
+        WHERE {where_clause}
+            AND cs.error_subcategory IS NOT NULL
+            AND TRIM(cs.error_subcategory) != ''
+        GROUP BY month, subcategory
+    )
+    SELECT 
+        sm.month,
+        sm.subcategory,
+        sm.disputes_count,
+        mt.total_disputes_month,
+        ROUND(100.0 * sm.disputes_count / mt.total_disputes_month, 2) as percentage
+    FROM subcategory_monthly sm
+    JOIN monthly_totals mt ON sm.month = mt.month
+    ORDER BY sm.subcategory, sm.month ASC
+    """
+    
+    try:
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials, auth_local_webserver=False)
+        return df
+    except Exception as e:
+        st.error(f"Error loading monthly subcategory volume: {e}")
         return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
@@ -1089,6 +1308,252 @@ def get_win_rate_cohort(date_range, platform_filter=None, chain_filter=None):
         st.error(f"Error loading win rate cohort: {e}")
         return pd.DataFrame()
 
+# Get win rate by order value brackets
+@st.cache_data(ttl=300)
+def get_win_rate_by_order_value(date_range, platform_filter, chain_filter):
+    """Analyze win rate by order value brackets using CORRECT calculation:
+    Won = ALL error categories, Settled = INACCURATE only"""
+    
+    # Build filter conditions (no INACCURATE filter here - we need ALL orders)
+    base_where = """
+        cs.chargeback_date >= '{start_date}'
+        AND cs.chargeback_date <= '{end_date}'
+    """.format(
+        start_date=date_range[0].strftime('%Y-%m-%d'),
+        end_date=date_range[1].strftime('%Y-%m-%d')
+    )
+    
+    # Add platform filter if specified
+    platform_where = ""
+    if platform_filter and platform_filter != ["All Platforms"] and "All Platforms" not in platform_filter:
+        if isinstance(platform_filter, list):
+            platform_list = "', '".join(platform_filter)
+            platform_where = f" AND cs.platform IN ('{platform_list}')"
+        else:
+            platform_where = f" AND cs.platform = '{platform_filter}'"
+    
+    # Add chain filter if specified
+    chain_join = ""
+    chain_where = ""
+    if chain_filter and chain_filter != ["All Chains"] and "All Chains" not in chain_filter:
+        chain_join = " INNER JOIN `restaurant_aggregate_metrics.slug_am_mapping` sm ON cs.slug = sm.slug"
+        if isinstance(chain_filter, list):
+            chain_list = "', '".join(chain_filter)
+            chain_where = f" AND sm.chain IN ('{chain_list}')"
+        else:
+            chain_where = f" AND sm.chain = '{chain_filter}'"
+    
+    # Build the SELECT fields dynamically
+    chain_field = "sm.chain," if chain_join else ""
+    
+    query = f"""
+    WITH order_value_brackets AS (
+        SELECT 
+            cs.slug,
+            cs.platform,
+            {chain_field}
+            cs.error_category,
+            COALESCE(cs.subtotal, 0) as order_value,
+            CASE
+                WHEN COALESCE(cs.subtotal, 0) <= 20 THEN '$0-20'
+                WHEN COALESCE(cs.subtotal, 0) <= 40 THEN '$20-40'
+                WHEN COALESCE(cs.subtotal, 0) <= 60 THEN '$40-60'
+                WHEN COALESCE(cs.subtotal, 0) <= 80 THEN '$60-80'
+                WHEN COALESCE(cs.subtotal, 0) <= 100 THEN '$80-100'
+                WHEN COALESCE(cs.subtotal, 0) <= 150 THEN '$100-150'
+                WHEN COALESCE(cs.subtotal, 0) <= 200 THEN '$150-200'
+                ELSE '$200+'
+            END as value_bracket,
+            CASE
+                WHEN COALESCE(cs.subtotal, 0) <= 20 THEN 1
+                WHEN COALESCE(cs.subtotal, 0) <= 40 THEN 2
+                WHEN COALESCE(cs.subtotal, 0) <= 60 THEN 3
+                WHEN COALESCE(cs.subtotal, 0) <= 80 THEN 4
+                WHEN COALESCE(cs.subtotal, 0) <= 100 THEN 5
+                WHEN COALESCE(cs.subtotal, 0) <= 150 THEN 6
+                WHEN COALESCE(cs.subtotal, 0) <= 200 THEN 7
+                ELSE 8
+            END as bracket_order,
+            cs.external_status,
+            -- Won from ALL categories
+            COALESCE(cs.enabled_won_disputes, 0) as won_amount,
+            -- Settled from INACCURATE only
+            CASE 
+                WHEN UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%'
+                    AND cs.external_status IN ('ACCEPTED', 'DENIED')
+                THEN COALESCE(cs.enabled_customer_refunds, 0)
+                ELSE 0
+            END as settled_amount,
+            -- Count only INACCURATE disputes
+            CASE 
+                WHEN UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%'
+                THEN 1
+                ELSE 0
+            END as is_inaccurate_dispute
+        FROM `merchant_portal_export.chargeback_split_summary` cs
+        {chain_join}
+        WHERE {base_where}{platform_where}{chain_where}
+    ),
+    bracket_summary AS (
+        SELECT 
+            value_bracket,
+            bracket_order,
+            SUM(is_inaccurate_dispute) as total_disputes,  -- Count INACCURATE disputes only
+            SUM(settled_amount) as total_settled,  -- Settled from INACCURATE only
+            SUM(won_amount) as total_won,  -- Won from ALL categories
+            -- Calculate win rate
+            CASE 
+                WHEN SUM(settled_amount) > 0 
+                THEN ROUND((SUM(won_amount) / SUM(settled_amount)) * 100, 2)
+                ELSE 0
+            END as win_rate,
+            -- Average order value in bracket (for INACCURATE orders only)
+            ROUND(AVG(CASE WHEN is_inaccurate_dispute = 1 THEN order_value ELSE NULL END), 2) as avg_order_value
+        FROM order_value_brackets
+        GROUP BY value_bracket, bracket_order
+        HAVING SUM(settled_amount) > 0  -- Only show brackets with settled INACCURATE disputes
+    )
+    SELECT 
+        value_bracket,
+        total_disputes,
+        total_settled,
+        total_won,
+        win_rate,
+        avg_order_value
+    FROM bracket_summary
+    WHERE total_disputes > 0
+    ORDER BY bracket_order
+    """
+    
+    try:
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials, auth_local_webserver=False)
+        return df
+    except Exception as e:
+        st.error(f"Error loading win rate by order value: {e}")
+        return pd.DataFrame()
+
+# Get win rate by order value brackets monthly trend
+@st.cache_data(ttl=300)
+def get_win_rate_by_order_value_monthly(date_range, platform_filter, chain_filter):
+    """Analyze win rate by order value brackets with monthly breakdown using CORRECT calculation:
+    Won = ALL error categories, Settled = INACCURATE only"""
+    
+    # Build filter conditions (no INACCURATE filter here - we need ALL orders)
+    base_where = """
+        cs.chargeback_date >= '{start_date}'
+        AND cs.chargeback_date <= '{end_date}'
+    """.format(
+        start_date=date_range[0].strftime('%Y-%m-%d'),
+        end_date=date_range[1].strftime('%Y-%m-%d')
+    )
+    
+    # Add platform filter if specified
+    platform_where = ""
+    if platform_filter and platform_filter != ["All Platforms"] and "All Platforms" not in platform_filter:
+        if isinstance(platform_filter, list):
+            platform_list = "', '".join(platform_filter)
+            platform_where = f" AND cs.platform IN ('{platform_list}')"
+        else:
+            platform_where = f" AND cs.platform = '{platform_filter}'"
+    
+    # Add chain filter if specified
+    chain_join = ""
+    chain_where = ""
+    if chain_filter and chain_filter != ["All Chains"] and "All Chains" not in chain_filter:
+        chain_join = " INNER JOIN `restaurant_aggregate_metrics.slug_am_mapping` sm ON cs.slug = sm.slug"
+        if isinstance(chain_filter, list):
+            chain_list = "', '".join(chain_filter)
+            chain_where = f" AND sm.chain IN ('{chain_list}')"
+        else:
+            chain_where = f" AND sm.chain = '{chain_filter}'"
+    
+    # Build the SELECT fields dynamically  
+    chain_field = "sm.chain," if chain_join else ""
+    
+    query = f"""
+    WITH order_value_brackets AS (
+        SELECT 
+            DATE_TRUNC(cs.chargeback_date, MONTH) as month,
+            cs.slug,
+            {chain_field}
+            cs.error_category,
+            COALESCE(cs.subtotal, 0) as order_value,
+            CASE
+                WHEN COALESCE(cs.subtotal, 0) <= 20 THEN '$0-20'
+                WHEN COALESCE(cs.subtotal, 0) <= 40 THEN '$20-40'
+                WHEN COALESCE(cs.subtotal, 0) <= 60 THEN '$40-60'
+                WHEN COALESCE(cs.subtotal, 0) <= 80 THEN '$60-80'
+                WHEN COALESCE(cs.subtotal, 0) <= 100 THEN '$80-100'
+                WHEN COALESCE(cs.subtotal, 0) <= 150 THEN '$100-150'
+                WHEN COALESCE(cs.subtotal, 0) <= 200 THEN '$150-200'
+                ELSE '$200+'
+            END as value_bracket,
+            CASE
+                WHEN COALESCE(cs.subtotal, 0) <= 20 THEN 1
+                WHEN COALESCE(cs.subtotal, 0) <= 40 THEN 2
+                WHEN COALESCE(cs.subtotal, 0) <= 60 THEN 3
+                WHEN COALESCE(cs.subtotal, 0) <= 80 THEN 4
+                WHEN COALESCE(cs.subtotal, 0) <= 100 THEN 5
+                WHEN COALESCE(cs.subtotal, 0) <= 150 THEN 6
+                WHEN COALESCE(cs.subtotal, 0) <= 200 THEN 7
+                ELSE 8
+            END as bracket_order,
+            cs.external_status,
+            -- Won from ALL categories
+            COALESCE(cs.enabled_won_disputes, 0) as won_amount,
+            -- Settled from INACCURATE only
+            CASE 
+                WHEN UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%'
+                    AND cs.external_status IN ('ACCEPTED', 'DENIED')
+                THEN COALESCE(cs.enabled_customer_refunds, 0)
+                ELSE 0
+            END as settled_amount,
+            -- Count only INACCURATE disputes
+            CASE 
+                WHEN UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%'
+                THEN 1
+                ELSE 0
+            END as is_inaccurate_dispute
+        FROM `merchant_portal_export.chargeback_split_summary` cs
+        {chain_join}
+        WHERE {base_where}{platform_where}{chain_where}
+    ),
+    monthly_bracket_summary AS (
+        SELECT 
+            month,
+            value_bracket,
+            bracket_order,
+            SUM(is_inaccurate_dispute) as total_disputes,  -- Count INACCURATE disputes only
+            SUM(settled_amount) as total_settled,  -- Settled from INACCURATE only
+            SUM(won_amount) as total_won,  -- Won from ALL categories
+            -- Calculate win rate
+            CASE 
+                WHEN SUM(settled_amount) > 0 
+                THEN ROUND((SUM(won_amount) / SUM(settled_amount)) * 100, 1)
+                ELSE 0
+            END as win_rate
+        FROM order_value_brackets
+        GROUP BY month, value_bracket, bracket_order
+        HAVING SUM(settled_amount) > 0  -- Only show brackets with settled INACCURATE disputes
+    )
+    SELECT 
+        month,
+        value_bracket,
+        bracket_order,
+        win_rate,
+        total_disputes,
+        total_settled
+    FROM monthly_bracket_summary
+    ORDER BY bracket_order, month ASC
+    """
+    
+    try:
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials, auth_local_webserver=False)
+        return df
+    except Exception as e:
+        st.error(f"Error loading monthly win rate by order value: {e}")
+        return pd.DataFrame()
+
 # Main dashboard
 def main():
     # Load data
@@ -1098,6 +1563,10 @@ def main():
         platform_df = get_platform_recovery(date_range, platform_filter, chain_filter)
         chain_df = get_chain_recovery(date_range, platform_filter, chain_filter)
         subcategory_df = get_subcategory_recovery(date_range, platform_filter, chain_filter)
+        subcategory_monthly_df = get_subcategory_recovery_monthly(date_range, platform_filter, chain_filter)
+        subcategory_volume_df = get_subcategory_volume_monthly(date_range, platform_filter, chain_filter)
+        order_value_df = get_win_rate_by_order_value(date_range, platform_filter, chain_filter)
+        order_value_monthly_df = get_win_rate_by_order_value_monthly(date_range, platform_filter, chain_filter)
         platform_trend_df = get_platform_win_rate_trend(date_range, platform_filter, chain_filter)
         cohort_df = get_cohort_analysis(date_range, platform_filter, chain_filter)
         win_rate_cohort_df = get_win_rate_cohort(date_range, platform_filter, chain_filter)
@@ -1224,6 +1693,306 @@ def main():
                 use_container_width=True,
                 hide_index=True
             )
+        
+        # Monthly Recovery Rate by Subcategory Table
+        st.subheader("📅 Monthly Recovery Rate by Subcategory")
+        
+        if not subcategory_monthly_df.empty:
+            # Create pivot table for monthly trends
+            monthly_pivot = subcategory_monthly_df.pivot_table(
+                index='subcategory',
+                columns='month',
+                values='win_rate',
+                fill_value=0
+            )
+            
+            # Get sorted months (chronological order - January to current month)
+            sorted_months = sorted(subcategory_monthly_df['month'].unique(), reverse=False)
+            month_labels = [pd.to_datetime(month).strftime('%b %Y') for month in sorted_months]
+            
+            # Limit to last 12 months if needed
+            month_labels = month_labels[-12:] if len(month_labels) > 12 else month_labels
+            sorted_months = sorted_months[-12:] if len(sorted_months) > 12 else sorted_months
+            
+            # Filter pivot table to only include the months we want
+            monthly_pivot = monthly_pivot[sorted_months]
+            monthly_pivot.columns = month_labels
+            
+            # Add overall average column
+            monthly_pivot['Overall Avg'] = subcategory_monthly_df.groupby('subcategory')['win_rate'].mean()
+            
+            # Style the dataframe with background gradient
+            styled_monthly = monthly_pivot.style.format('{:.1f}%').background_gradient(
+                cmap='RdYlGn', 
+                vmin=0, 
+                vmax=100,
+                subset=[col for col in monthly_pivot.columns if col != 'Overall Avg']
+            ).background_gradient(
+                cmap='RdYlGn', 
+                vmin=0, 
+                vmax=100,
+                subset=['Overall Avg']
+            )
+            
+            st.dataframe(styled_monthly, use_container_width=True)
+            
+            # Summary statistics
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                best_month = monthly_pivot.drop('Overall Avg', axis=1).mean().idxmax()
+                best_rate = monthly_pivot.drop('Overall Avg', axis=1).mean().max()
+                st.metric("Best Month", best_month, f"{best_rate:.1f}%")
+            
+            with col2:
+                best_subcategory = monthly_pivot['Overall Avg'].idxmax()
+                best_subcategory_rate = monthly_pivot['Overall Avg'].max()
+                st.metric("Best Subcategory", best_subcategory, f"{best_subcategory_rate:.1f}%")
+            
+            with col3:
+                overall_trend = "↗️" if monthly_pivot.drop('Overall Avg', axis=1).mean().iloc[-1] > monthly_pivot.drop('Overall Avg', axis=1).mean().iloc[0] else "↘️"
+                st.metric("Trend", "Overall", overall_trend)
+        
+        else:
+            st.info("No monthly subcategory data available for the selected filters.")
+        
+        # Monthly Dispute Volume by Subcategory (Percentage)
+        st.subheader("📊 Monthly Dispute Volume by Subcategory (%)")
+        
+        if not subcategory_volume_df.empty:
+            # Create pivot table for volume percentages
+            volume_pivot = subcategory_volume_df.pivot_table(
+                index='subcategory',
+                columns='month',
+                values='percentage',
+                fill_value=0
+            )
+            
+            # Get sorted months (chronological order - January to current month)
+            sorted_months = sorted(subcategory_volume_df['month'].unique(), reverse=False)
+            month_labels = [pd.to_datetime(month).strftime('%b %Y') for month in sorted_months]
+            
+            # Limit to last 12 months if needed
+            month_labels = month_labels[-12:] if len(month_labels) > 12 else month_labels
+            sorted_months = sorted_months[-12:] if len(sorted_months) > 12 else sorted_months
+            
+            # Filter pivot table to only include the months we want
+            volume_pivot = volume_pivot[sorted_months]
+            volume_pivot.columns = month_labels
+            
+            # Add overall average column
+            volume_pivot['Overall Avg'] = subcategory_volume_df.groupby('subcategory')['percentage'].mean()
+            
+            # Style the dataframe with background gradient (different color scheme for volume)
+            styled_volume = volume_pivot.style.format('{:.1f}%').background_gradient(
+                cmap='Blues', 
+                vmin=0, 
+                vmax=volume_pivot.drop('Overall Avg', axis=1).max().max(),
+                subset=[col for col in volume_pivot.columns if col != 'Overall Avg']
+            ).background_gradient(
+                cmap='Blues', 
+                vmin=0, 
+                vmax=volume_pivot['Overall Avg'].max(),
+                subset=['Overall Avg']
+            )
+            
+            st.dataframe(styled_volume, use_container_width=True)
+            
+            # Summary statistics for volume
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                peak_month = volume_pivot.drop('Overall Avg', axis=1).mean().idxmax()
+                peak_rate = volume_pivot.drop('Overall Avg', axis=1).mean().max()
+                st.metric("Peak Volume Month", peak_month, f"{peak_rate:.1f}%")
+            
+            with col2:
+                highest_volume_category = volume_pivot['Overall Avg'].idxmax()
+                highest_volume_rate = volume_pivot['Overall Avg'].max()
+                st.metric("Highest Volume Category", highest_volume_category, f"{highest_volume_rate:.1f}%")
+            
+            with col3:
+                total_categories = len(volume_pivot)
+                st.metric("Categories Tracked", str(total_categories), "subcategories")
+        
+        else:
+            st.info("No monthly subcategory volume data available for the selected filters.")
+    
+    st.markdown("---")
+    
+    # Win Rate by Order Value Brackets
+    if not order_value_df.empty:
+        st.header("💰 Win Rate by Order Value")
+        st.caption("Success rate of disputes by order value brackets")
+        
+        # Overall summary bar chart
+        col1, col2 = st.columns([3, 1])
+        
+        with col1:
+            # Bar chart showing win rate by order value brackets
+            fig = px.bar(
+                order_value_df,
+                x='value_bracket',
+                y='win_rate',
+                title='Overall Win Rate by Order Value Brackets',
+                color='win_rate',
+                color_continuous_scale='RdYlGn',
+                text='win_rate',
+                hover_data={
+                    'total_disputes': ':,.0f',
+                    'total_settled': ':,.2f',
+                    'avg_order_value': ':.2f'
+                }
+            )
+            
+            fig.update_traces(
+                texttemplate='%{text:.1f}%',
+                textposition='outside',
+                hovertemplate=(
+                    '<b>%{x}</b><br>' +
+                    'Win Rate: %{y:.1f}%<br>' +
+                    'Total Disputes: %{customdata[0]:,.0f}<br>' +
+                    'Total Settled: $%{customdata[1]:,.0f}<br>' +
+                    'Avg Order Value: $%{customdata[2]:.2f}<br>' +
+                    '<extra></extra>'
+                )
+            )
+            
+            fig.update_layout(
+                xaxis_title="Order Value Bracket",
+                yaxis_title="Win Rate (%)",
+                showlegend=False,
+                height=400
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Summary statistics
+            st.subheader("Key Insights")
+            
+            # Best performing bracket
+            best_bracket = order_value_df.loc[order_value_df['win_rate'].idxmax()]
+            st.metric(
+                "Best Performing",
+                best_bracket['value_bracket'],
+                f"{best_bracket['win_rate']:.1f}% win rate"
+            )
+            
+            # Worst performing bracket
+            worst_bracket = order_value_df.loc[order_value_df['win_rate'].idxmin()]
+            st.metric(
+                "Needs Attention",
+                worst_bracket['value_bracket'],
+                f"{worst_bracket['win_rate']:.1f}% win rate",
+                delta_color="inverse"
+            )
+            
+            # Volume distribution
+            total_disputes = order_value_df['total_disputes'].sum()
+            most_disputes = order_value_df.loc[order_value_df['total_disputes'].idxmax()]
+            st.metric(
+                "Highest Volume",
+                most_disputes['value_bracket'],
+                f"{(most_disputes['total_disputes']/total_disputes*100):.1f}% of disputes"
+            )
+        
+        # Monthly trend table
+        if not order_value_monthly_df.empty:
+            st.subheader("📊 Monthly Win Rate Trend by Order Value")
+            st.caption("Win rate percentage by order value bracket over the last 12 months")
+            
+            # Pivot the data to create a table with brackets as rows and months as columns
+            order_value_monthly_df['month'] = pd.to_datetime(order_value_monthly_df['month'])
+            order_value_monthly_df['month_label'] = order_value_monthly_df['month'].dt.strftime('%b %Y')
+            
+            # Create pivot table
+            pivot_df = order_value_monthly_df.pivot_table(
+                index='value_bracket',
+                columns='month_label',
+                values='win_rate',
+                aggfunc='first'
+            )
+            
+            # Sort columns by date (oldest first - chronological order)
+            sorted_months = sorted(order_value_monthly_df['month'].unique(), reverse=False)
+            month_labels = [pd.to_datetime(m).strftime('%b %Y') for m in sorted_months]
+            
+            # Limit to last 12 months (take from the end since we're in chronological order)
+            month_labels = month_labels[-12:] if len(month_labels) > 12 else month_labels
+            pivot_df = pivot_df[month_labels]
+            
+            # Sort rows by bracket order
+            bracket_order = ['$0-20', '$20-40', '$40-60', '$60-80', '$80-100', '$100-150', '$150-200', '$200+']
+            pivot_df = pivot_df.reindex([b for b in bracket_order if b in pivot_df.index])
+            
+            # Create a styled dataframe with color coding
+            styled_df = pivot_df.style.format('{:.1f}%', na_rep='-')\
+                .background_gradient(cmap='RdYlGn', vmin=0, vmax=100, axis=None)\
+                .set_properties(**{'text-align': 'center'})
+            
+            st.dataframe(styled_df, use_container_width=True)
+            
+            # Add a heatmap visualization
+            with st.expander("View as Heatmap"):
+                fig_heatmap = go.Figure(data=go.Heatmap(
+                    z=pivot_df.values,
+                    x=pivot_df.columns,
+                    y=pivot_df.index,
+                    colorscale='RdYlGn',
+                    text=pivot_df.values,
+                    texttemplate='%{text:.1f}%',
+                    textfont={"size": 10},
+                    colorbar=dict(title="Win Rate (%)")
+                ))
+                
+                fig_heatmap.update_layout(
+                    title='Win Rate Heatmap by Order Value and Month',
+                    xaxis_title='Month',
+                    yaxis_title='Order Value Bracket',
+                    height=400
+                )
+                
+                st.plotly_chart(fig_heatmap, use_container_width=True)
+            
+            # Add dispute volume table as percentage
+            st.subheader("📊 Monthly Dispute Distribution by Order Value")
+            st.caption("Percentage of disputed orders by order value bracket for each month")
+            
+            # Create pivot table for dispute counts
+            volume_pivot_df = order_value_monthly_df.pivot_table(
+                index='value_bracket',
+                columns='month_label',
+                values='total_disputes',
+                aggfunc='first'
+            )
+            
+            # Use the same sorted months and bracket order
+            volume_pivot_df = volume_pivot_df[month_labels]
+            volume_pivot_df = volume_pivot_df.reindex([b for b in bracket_order if b in volume_pivot_df.index])
+            
+            # Convert to percentages - each column (month) should sum to 100%
+            volume_pct_df = volume_pivot_df.div(volume_pivot_df.sum(axis=0), axis=1) * 100
+            
+            # Create a styled dataframe with color coding for percentages
+            styled_volume_df = volume_pct_df.style.format('{:.1f}%', na_rep='-')\
+                .background_gradient(cmap='Blues', axis=None)\
+                .set_properties(**{'text-align': 'center'})
+            
+            st.dataframe(styled_volume_df, use_container_width=True)
+            
+            # Add a note about the percentages
+            st.caption("💡 Each column sums to 100% - showing the distribution of disputes across order value brackets for that month")
+            
+            # Add total row at the bottom
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                total_disputes = order_value_monthly_df['total_disputes'].sum()
+                st.metric("Total Disputes", f"{total_disputes:,.0f}")
+            with col2:
+                avg_order_value = order_value_df['avg_order_value'].mean() if not order_value_df.empty else 0
+                st.metric("Avg Order Value", f"${avg_order_value:.2f}")
+            with col3:
+                highest_volume_bracket = order_value_df.loc[order_value_df['total_disputes'].idxmax(), 'value_bracket'] if not order_value_df.empty else "N/A"
+                st.metric("Highest Volume Bracket", highest_volume_bracket)
     
     st.markdown("---")
     
