@@ -274,6 +274,13 @@ def get_monthly_recovery(date_range, platform_filter, chain_filter):
             platform_list = platform_filter
         filters.append(f"cs.platform IN ('{platform_list}')")
     
+    # Handle chain filter with JOIN
+    chain_join = ""
+    if chain_filter and "All Chains" not in chain_filter:
+        chain_join = "JOIN `restaurant_aggregate_metrics.slug_am_mapping` sm ON cs.slug = sm.slug"
+        chain_list = "', '".join(chain_filter)
+        filters.append(f"sm.chain IN ('{chain_list}')")
+    
     base_where = " AND ".join(filters) if filters else "1=1"
     
     query = f"""
@@ -318,6 +325,7 @@ def get_monthly_recovery(date_range, platform_filter, chain_filter):
             END) as dispute_count
             
         FROM `merchant_portal_export.chargeback_split_summary` cs
+        {chain_join}
         WHERE {base_where}
         GROUP BY month
     )
