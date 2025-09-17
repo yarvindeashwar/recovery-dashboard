@@ -1036,6 +1036,90 @@ def get_ontime_dispute_analysis(date_range, platform_filter, chain_filter):
         return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
+def get_monthly_dispute_filing_status(date_range, platform_filter, chain_filter):
+    """Get month-by-month dispute filing status analysis"""
+    
+    # Build filters
+    filters = []
+    
+    if date_range and len(date_range) == 2:
+        filters.append(f"cs.chargeback_date BETWEEN '{date_range[0]}' AND '{date_range[1]}'")
+    
+    if platform_filter and "All Platforms" not in platform_filter:
+        platform_list = "', '".join(platform_filter)
+        filters.append(f"cs.platform IN ('{platform_list}')")
+    
+    # Handle chain filter with join
+    chain_join = ""
+    if chain_filter and "All Chains" not in chain_filter:
+        chain_join = "JOIN `restaurant_aggregate_metrics.slug_am_mapping` sm ON cs.slug = sm.slug"
+        chain_list = "', '".join(chain_filter)
+        filters.append(f"sm.chain IN ('{chain_list}')")
+    
+    # Add inaccurate filter
+    filters.append("UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%'")
+    
+    where_clause = " AND ".join(filters) if filters else "1=1"
+    
+    query = f"""
+    WITH monthly_disputes AS (
+        SELECT 
+            DATE_TRUNC(cs.chargeback_date, MONTH) as month,
+            cs.external_status,
+            COUNT(*) as dispute_count,
+            SUM(COALESCE(cs.enabled_customer_refunds, 0)) as total_amount
+        FROM `merchant_portal_export.chargeback_split_summary` cs
+        {chain_join}
+        WHERE {where_clause}
+        GROUP BY month, cs.external_status
+    ),
+    monthly_summary AS (
+        SELECT 
+            month,
+            -- Total disputes (all statuses)
+            SUM(dispute_count) as total_count,
+            -- Disputes that were filed (ACCEPTED, DENIED, or IN_PROGRESS)
+            SUM(CASE 
+                WHEN external_status IN ('ACCEPTED', 'DENIED', 'IN_PROGRESS') THEN dispute_count 
+                ELSE 0 
+            END) as filed_count,
+            -- Disputes not filed or expired (TO_BE_RAISED or EXPIRED)
+            SUM(CASE 
+                WHEN external_status IN ('TO_BE_RAISED', 'EXPIRED') THEN dispute_count 
+                ELSE 0 
+            END) as not_filed_count,
+            -- Other statuses
+            SUM(CASE 
+                WHEN external_status NOT IN ('ACCEPTED', 'DENIED', 'IN_PROGRESS', 'TO_BE_RAISED', 'EXPIRED') 
+                THEN dispute_count 
+                ELSE 0 
+            END) as other_count,
+            SUM(total_amount) as total_amount
+        FROM monthly_disputes
+        GROUP BY month
+    )
+    SELECT 
+        month,
+        total_count,
+        filed_count,
+        not_filed_count,
+        other_count,
+        ROUND(100.0 * filed_count / NULLIF(filed_count + not_filed_count, 0), 1) as filing_rate,
+        total_amount
+    FROM monthly_summary
+    ORDER BY month
+    """
+    
+    try:
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials, auth_local_webserver=False)
+        if not df.empty:
+            df['month'] = pd.to_datetime(df['month'])
+        return df
+    except Exception as e:
+        st.error(f"Error loading monthly dispute filing status: {e}")
+        return pd.DataFrame()
+
+@st.cache_data(ttl=3600)
 def get_expiry_analysis(date_range, platform_filter, chain_filter):
     """Analyze orders disputed before vs after expiry date"""
     
@@ -2307,89 +2391,203 @@ def main():
     st.header("📊 Dispute Filing Status Analysis")
     st.caption("Analysis of disputes by their processing status - Filed (Accepted/Denied/In-Progress) vs Not Filed (To-Be-Raised/Expired)")
     
-    with st.spinner("Loading on-time dispute analysis..."):
+    with st.spinner("Loading dispute filing analysis..."):
         ontime_df = get_ontime_dispute_analysis(date_range, platform_filter, chain_filter)
+        monthly_filing_df = get_monthly_dispute_filing_status(date_range, platform_filter, chain_filter)
     
-    if not ontime_df.empty:
-        # Display metrics by platform
-        cols = st.columns(len(ontime_df))
-        
-        for idx, (col, row) in enumerate(zip(cols, ontime_df.itertuples())):
-            with col:
-                # Color based on performance
-                if row.on_time_percentage >= 90:
-                    color = "🟢"
-                elif row.on_time_percentage >= 75:
-                    color = "🟡"
-                else:
-                    color = "🔴"
-                
-                st.metric(
-                    f"{color} {row.platform}",
-                    f"{row.on_time_percentage:.1f}%",
-                    f"{row.on_time_count:,} of {row.on_time_count + row.late_count:,} disputes",
-                    help="Disputes that have been filed (ACCEPTED/DENIED/IN_PROGRESS) vs not filed (TO_BE_RAISED/EXPIRED)"
+    # Create tabs for different views
+    tab1, tab2 = st.tabs(["Platform Overview", "Monthly Trend"])
+    
+    with tab1:
+        if not ontime_df.empty:
+            # Display metrics by platform
+            cols = st.columns(len(ontime_df))
+            
+            for idx, (col, row) in enumerate(zip(cols, ontime_df.itertuples())):
+                with col:
+                    # Color based on performance
+                    if row.on_time_percentage >= 90:
+                        color = "🟢"
+                    elif row.on_time_percentage >= 75:
+                        color = "🟡"
+                    else:
+                        color = "🔴"
+                    
+                    st.metric(
+                        f"{color} {row.platform}",
+                        f"{row.on_time_percentage:.1f}%",
+                        f"{row.on_time_count:,} of {row.on_time_count + row.late_count:,} disputes",
+                        help="Disputes that have been filed (ACCEPTED/DENIED/IN_PROGRESS) vs not filed (TO_BE_RAISED/EXPIRED)"
+                    )
+            
+            # Visualization
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Bar chart of on-time percentages
+                fig_bar = px.bar(
+                    ontime_df,
+                    x='platform',
+                    y='on_time_percentage',
+                    title='Dispute Filing Rate by Platform',
+                    labels={'on_time_percentage': 'Filing Rate %', 'platform': 'Platform'},
+                    color='on_time_percentage',
+                    color_continuous_scale='RdYlGn',
+                    range_color=[0, 100],
+                    text='on_time_percentage'
                 )
-        
-        # Visualization
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Bar chart of on-time percentages
-            fig_bar = px.bar(
-                ontime_df,
-                x='platform',
-                y='on_time_percentage',
-                title='Dispute Filing Rate by Platform',
-                labels={'on_time_percentage': 'On-Time %', 'platform': 'Platform'},
-                color='on_time_percentage',
-                color_continuous_scale='RdYlGn',
-                range_color=[0, 100],
-                text='on_time_percentage'
+                fig_bar.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
+                fig_bar.update_layout(showlegend=False)
+                st.plotly_chart(fig_bar, use_container_width=True)
+            
+            with col2:
+                # Pie chart showing overall on-time vs late
+                total_on_time = ontime_df['on_time_count'].sum()
+                total_late = ontime_df['late_count'].sum()
+                
+                pie_data = pd.DataFrame({
+                    'status': ['Filed', 'Not Filed'],
+                    'count': [total_on_time, total_late]
+                })
+                
+                fig_pie = px.pie(
+                    pie_data,
+                    values='count',
+                    names='status',
+                    title='Overall Filed vs Not Filed Disputes',
+                    color_discrete_map={
+                        'Filed': '#2ecc71',
+                        'Not Filed': '#e74c3c'
+                    }
+                )
+                fig_pie.update_traces(textposition='inside', textinfo='percent+label')
+                st.plotly_chart(fig_pie, use_container_width=True)
+            
+            # Detailed table
+            with st.expander("View Platform Details"):
+                display_df = ontime_df[['platform', 'dispute_window', 'total_count', 'on_time_count', 'late_count', 'on_time_percentage', 'total_amount']].copy()
+                display_df.columns = ['Platform', 'Window (Days)', 'Total Disputes', 'Filed', 'Not Filed', 'Filed %', 'Total Amount']
+                
+                st.dataframe(
+                    display_df.style.format({
+                        'Total Disputes': '{:,.0f}',
+                        'Filed': '{:,.0f}',
+                        'Not Filed': '{:,.0f}',
+                        'Filed %': '{:.1f}%',
+                        'Total Amount': '${:,.0f}'
+                    }),
+                    use_container_width=True,
+                    hide_index=True
+                )
+    
+    with tab2:
+        if not monthly_filing_df.empty:
+            st.subheader("📅 Monthly Filing Status Trend")
+            
+            # Create a line chart for filing rate trend
+            monthly_filing_df['month_label'] = monthly_filing_df['month'].dt.strftime('%b %Y')
+            
+            fig_line = go.Figure()
+            
+            # Add filing rate line
+            fig_line.add_trace(go.Scatter(
+                x=monthly_filing_df['month'],
+                y=monthly_filing_df['filing_rate'],
+                mode='lines+markers+text',
+                name='Filing Rate',
+                text=monthly_filing_df['filing_rate'].apply(lambda x: f'{x:.1f}%'),
+                textposition="top center",
+                line=dict(color='#2ecc71', width=3),
+                marker=dict(size=10)
+            ))
+            
+            # Add a reference line at 80%
+            fig_line.add_hline(y=80, line_dash="dash", line_color="gray", 
+                             annotation_text="Target: 80%", annotation_position="left")
+            
+            fig_line.update_layout(
+                title='Dispute Filing Rate Trend',
+                xaxis_title='Month',
+                yaxis_title='Filing Rate (%)',
+                yaxis_range=[0, 100],
+                height=400,
+                hovermode='x unified'
             )
-            fig_bar.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
-            fig_bar.update_layout(showlegend=False)
-            st.plotly_chart(fig_bar, use_container_width=True)
-        
-        with col2:
-            # Pie chart showing overall on-time vs late
-            total_on_time = ontime_df['on_time_count'].sum()
-            total_late = ontime_df['late_count'].sum()
             
-            pie_data = pd.DataFrame({
-                'status': ['Filed', 'Not Filed'],
-                'count': [total_on_time, total_late]
-            })
+            st.plotly_chart(fig_line, use_container_width=True)
             
-            fig_pie = px.pie(
-                pie_data,
-                values='count',
-                names='status',
-                title='Overall Filed vs Not Filed Disputes',
-                color_discrete_map={
-                    'Filed': '#2ecc71',
-                    'Not Filed': '#e74c3c'
-                }
-            )
-            fig_pie.update_traces(textposition='inside', textinfo='percent+label')
-            st.plotly_chart(fig_pie, use_container_width=True)
-        
-        # Detailed table
-        with st.expander("View Platform Details"):
-            display_df = ontime_df[['platform', 'dispute_window', 'total_count', 'on_time_count', 'late_count', 'on_time_percentage', 'total_amount']].copy()
-            display_df.columns = ['Platform', 'Window (Days)', 'Total Disputes', 'Filed', 'Not Filed', 'Filed %', 'Total Amount']
+            # Stacked bar chart for filed vs not filed
+            col1, col2 = st.columns(2)
             
-            st.dataframe(
-                display_df.style.format({
-                    'Total Disputes': '{:,.0f}',
+            with col1:
+                # Stacked bar chart
+                fig_stack = go.Figure()
+                
+                fig_stack.add_trace(go.Bar(
+                    x=monthly_filing_df['month'],
+                    y=monthly_filing_df['filed_count'],
+                    name='Filed',
+                    marker_color='#2ecc71',
+                    text=monthly_filing_df['filed_count'],
+                    textposition='auto'
+                ))
+                
+                fig_stack.add_trace(go.Bar(
+                    x=monthly_filing_df['month'],
+                    y=monthly_filing_df['not_filed_count'],
+                    name='Not Filed',
+                    marker_color='#e74c3c',
+                    text=monthly_filing_df['not_filed_count'],
+                    textposition='auto'
+                ))
+                
+                fig_stack.update_layout(
+                    title='Monthly Filing Status Distribution',
+                    barmode='stack',
+                    xaxis_title='Month',
+                    yaxis_title='Number of Disputes',
+                    height=400,
+                    hovermode='x unified'
+                )
+                
+                st.plotly_chart(fig_stack, use_container_width=True)
+            
+            with col2:
+                # Monthly summary metrics
+                st.subheader("📊 Monthly Summary")
+                
+                # Calculate average and trend
+                avg_filing_rate = monthly_filing_df['filing_rate'].mean()
+                recent_trend = monthly_filing_df['filing_rate'].iloc[-3:].mean() if len(monthly_filing_df) >= 3 else avg_filing_rate
+                trend_direction = "📈" if recent_trend > avg_filing_rate else "📉"
+                
+                st.metric("Average Filing Rate", f"{avg_filing_rate:.1f}%")
+                st.metric("Recent 3-Month Average", f"{recent_trend:.1f}%", 
+                         delta=f"{recent_trend - avg_filing_rate:.1f}%")
+                
+                # Best and worst months
+                best_month = monthly_filing_df.loc[monthly_filing_df['filing_rate'].idxmax()]
+                worst_month = monthly_filing_df.loc[monthly_filing_df['filing_rate'].idxmin()]
+                
+                st.success(f"🏆 Best Month: {best_month['month'].strftime('%b %Y')} ({best_month['filing_rate']:.1f}%)")
+                st.error(f"⚠️ Worst Month: {worst_month['month'].strftime('%b %Y')} ({worst_month['filing_rate']:.1f}%)")
+            
+            # Detailed monthly table
+            with st.expander("📋 View Monthly Details"):
+                display_monthly = monthly_filing_df[['month_label', 'filed_count', 'not_filed_count', 
+                                                     'total_count', 'filing_rate', 'total_amount']].copy()
+                display_monthly.columns = ['Month', 'Filed', 'Not Filed', 'Total', 'Filing Rate %', 'Total Amount']
+                
+                # Apply background gradient to filing rate
+                styled_monthly = display_monthly.style.format({
                     'Filed': '{:,.0f}',
                     'Not Filed': '{:,.0f}',
-                    'Filed %': '{:.1f}%',
+                    'Total': '{:,.0f}',
+                    'Filing Rate %': '{:.1f}%',
                     'Total Amount': '${:,.0f}'
-                }),
-                use_container_width=True,
-                hide_index=True
-            )
+                }).background_gradient(subset=['Filing Rate %'], cmap='RdYlGn', vmin=0, vmax=100)
+                
+                st.dataframe(styled_monthly, use_container_width=True, hide_index=True)
     
     st.markdown("---")
     
