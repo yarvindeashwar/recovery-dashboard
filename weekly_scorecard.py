@@ -6,17 +6,15 @@ P0-P4 Chain Segmentation with Monthly Overview
 import streamlit as st
 import pandas as pd
 import pandas_gbq
-from google.oauth2 import service_account
 import os
 from datetime import date, timedelta, datetime
 import plotly.graph_objects as go
 import plotly.express as px
 import numpy as np
 import calendar
+from google.oauth2 import service_account
 
 # Configuration
-os.environ['GOOGLE_AUTH_DISABLE_METADATA_SERVER'] = 'True'
-os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = ''
 PROJECT_ID = 'arboreal-vision-339901'
 
 # Page config
@@ -28,7 +26,21 @@ st.set_page_config(
 )
 
 # Initialize credentials
-credentials = None
+try:
+    # Try to use Streamlit secrets first (for cloud deployment)
+    if 'gcp_service_account' in st.secrets:
+        from google.oauth2 import service_account
+        credentials = service_account.Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"]
+        )
+    else:
+        # For local development
+        os.environ['GOOGLE_AUTH_DISABLE_METADATA_SERVER'] = 'True'
+        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = ''
+        credentials = None
+except Exception as e:
+    st.error(f"Error loading credentials: {e}")
+    credentials = None
 
 # Title and description
 st.title("📊 Weekly Recovery Scorecard")
@@ -127,7 +139,7 @@ def get_monthly_overview(start_date, end_date, month_label):
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials, auth_local_webserver=False)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
         if not df.empty:
             row = df.iloc[0]
             # Calculate days in period for monthly average
@@ -224,7 +236,7 @@ def get_chains_movement(current_start, current_end, previous_start, previous_end
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials, auth_local_webserver=False)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
         return df
     except Exception as e:
         st.error(f"Error fetching chain movement: {e}")
@@ -275,7 +287,7 @@ def get_platform_breakdown(start_date, end_date, month_label):
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials, auth_local_webserver=False)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
         return df
     except Exception as e:
         st.error(f"Error fetching platform breakdown: {e}")
@@ -329,7 +341,7 @@ def get_chain_segmentation():
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials, auth_local_webserver=False)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
         return df
     except Exception as e:
         st.error(f"Error fetching segmentation: {e}")
@@ -804,7 +816,7 @@ def get_segment_monthly_data(start_date, end_date, month_label, segment):
     """
     
     try:
-        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials, auth_local_webserver=False)
+        df = pandas_gbq.read_gbq(query, project_id=PROJECT_ID, credentials=credentials)
         if not df.empty:
             row = df.iloc[0]
             return {
