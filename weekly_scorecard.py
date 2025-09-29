@@ -78,7 +78,7 @@ def get_monthly_overview(start_date, end_date, month_label):
     
     query = f"""
     WITH monthly_data AS (
-        SELECT 
+        SELECT
             sm.chain,
             sm.slug,
             sm.b_name_id,
@@ -86,12 +86,12 @@ def get_monthly_overview(start_date, end_date, month_label):
             cs.external_status,
             cs.error_category,
             COALESCE(cs.enabled_won_disputes, 0) as won_amount,
-            CASE 
+            CASE
                 WHEN cs.external_status IN ('ACCEPTED', 'DENIED')
                 THEN COALESCE(cs.enabled_customer_refunds, 0)
                 ELSE 0
             END as settled_amount,
-            CASE 
+            CASE
                 WHEN cs.external_status = 'ACCEPTED' THEN 'won'
                 WHEN cs.external_status = 'DENIED' THEN 'lost'
                 ELSE 'pending'
@@ -102,11 +102,18 @@ def get_monthly_overview(start_date, end_date, month_label):
             AND sm.chain IS NOT NULL
             AND sm.chain != ''
     ),
+    -- Get location count from chargeback_orders_enriched table
+    location_counts AS (
+        SELECT
+            COUNT(DISTINCT CONCAT(chain, b_name)) as unique_locations
+        FROM `merchant_portal_export.chargeback_orders_enriched`
+        WHERE order_date BETWEEN '{start_date}' AND '{end_date}'
+            AND is_loop_enabled = true
+            AND loop_raised_timestamp IS NOT NULL
+    ),
     platform_metrics AS (
-        SELECT 
+        SELECT
             chain,
-            -- Count unique physical locations using b_name_id
-            COUNT(DISTINCT b_name_id) as unique_locations,
             -- Count unique slug-platform combinations (match actual platform values in database)
             COUNT(DISTINCT CASE WHEN TRIM(platform) = 'Doordash' THEN slug END) as dd_locations,
             COUNT(DISTINCT CASE WHEN TRIM(platform) = 'UberEats' THEN slug END) as ue_locations,
@@ -120,9 +127,9 @@ def get_monthly_overview(start_date, end_date, month_label):
         FROM monthly_data
         GROUP BY chain
     )
-    SELECT 
+    SELECT
         COUNT(DISTINCT chain) as chain_count,
-        SUM(unique_locations) as unique_locations,
+        (SELECT unique_locations FROM location_counts) as unique_locations,
         SUM(dd_locations) as dd_locations,
         SUM(ue_locations) as ue_locations,
         SUM(gh_locations) as gh_locations,
@@ -189,16 +196,17 @@ def get_chains_movement(current_start, current_end, previous_start, previous_end
             AND sm.chain != ''
     ),
     chain_segments AS (
-        SELECT 
-            sm.chain,
-            COUNT(DISTINCT sm.slug) as location_count,
-            ROW_NUMBER() OVER (ORDER BY COUNT(DISTINCT sm.slug) DESC) as rank_by_locations
-        FROM `merchant_portal_export.chargeback_split_summary` cs
-        JOIN `restaurant_aggregate_metrics.slug_am_mapping` sm ON cs.slug = sm.slug
-        WHERE cs.chargeback_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
-            AND sm.chain IS NOT NULL
-            AND sm.chain != ''
-        GROUP BY sm.chain
+        SELECT
+            chain,
+            COUNT(DISTINCT CONCAT(chain, b_name)) as location_count,
+            ROW_NUMBER() OVER (ORDER BY COUNT(DISTINCT CONCAT(chain, b_name)) DESC) as rank_by_locations
+        FROM `merchant_portal_export.chargeback_orders_enriched`
+        WHERE order_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+            AND is_loop_enabled = true
+            AND loop_raised_timestamp IS NOT NULL
+            AND chain IS NOT NULL
+            AND chain != ''
+        GROUP BY chain
     ),
     segmented_chains AS (
         SELECT 
@@ -245,21 +253,23 @@ def get_chains_movement(current_start, current_end, previous_start, previous_end
 @st.cache_data(ttl=3600)
 def get_platform_breakdown(start_date, end_date, month_label):
     """Get platform-specific metrics"""
-    
+
     query = f"""
     WITH monthly_data AS (
-        SELECT 
+        SELECT
             cs.platform,
             sm.b_name_id,
             sm.slug,
+            sm.chain,
+            sm.b_name,
             cs.external_status,
             COALESCE(cs.enabled_won_disputes, 0) as won_amount,
-            CASE 
+            CASE
                 WHEN cs.external_status IN ('ACCEPTED', 'DENIED')
                 THEN COALESCE(cs.enabled_customer_refunds, 0)
                 ELSE 0
             END as settled_amount,
-            CASE 
+            CASE
                 WHEN cs.external_status = 'ACCEPTED' THEN 'won'
                 WHEN cs.external_status = 'DENIED' THEN 'lost'
                 ELSE 'pending'
@@ -269,21 +279,33 @@ def get_platform_breakdown(start_date, end_date, month_label):
         WHERE cs.chargeback_date BETWEEN '{start_date}' AND '{end_date}'
             AND sm.chain IS NOT NULL
             AND sm.chain != ''
+    ),
+    -- Get location counts per platform from chargeback_orders_enriched
+    platform_locations AS (
+        SELECT
+            platform,
+            COUNT(DISTINCT CONCAT(chain, b_name)) as unique_locations
+        FROM `merchant_portal_export.chargeback_orders_enriched`
+        WHERE order_date BETWEEN '{start_date}' AND '{end_date}'
+            AND is_loop_enabled = true
+            AND loop_raised_timestamp IS NOT NULL
+        GROUP BY platform
     )
-    SELECT 
-        TRIM(platform) as platform,
-        COUNT(DISTINCT b_name_id) as unique_locations,
-        COUNT(DISTINCT slug) as slug_count,
+    SELECT
+        TRIM(md.platform) as platform,
+        COALESCE(pl.unique_locations, 0) as unique_locations,
+        COUNT(DISTINCT md.slug) as slug_count,
         COUNT(*) as total_disputed,
-        SUM(CASE WHEN dispute_status = 'won' THEN 1 ELSE 0 END) as disputes_won,
-        SUM(CASE WHEN dispute_status = 'lost' THEN 1 ELSE 0 END) as disputes_lost,
-        SUM(CASE WHEN dispute_status = 'pending' THEN 1 ELSE 0 END) as disputes_pending,
-        SUM(won_amount) as total_recovered,
-        SUM(settled_amount) as total_settled,
-        ROUND(SAFE_DIVIDE(SUM(won_amount), NULLIF(SUM(settled_amount), 0)) * 100, 2) as win_rate
-    FROM monthly_data
-    GROUP BY platform
-    ORDER BY platform
+        SUM(CASE WHEN md.dispute_status = 'won' THEN 1 ELSE 0 END) as disputes_won,
+        SUM(CASE WHEN md.dispute_status = 'lost' THEN 1 ELSE 0 END) as disputes_lost,
+        SUM(CASE WHEN md.dispute_status = 'pending' THEN 1 ELSE 0 END) as disputes_pending,
+        SUM(md.won_amount) as total_recovered,
+        SUM(md.settled_amount) as total_settled,
+        ROUND(SAFE_DIVIDE(SUM(md.won_amount), NULLIF(SUM(md.settled_amount), 0)) * 100, 2) as win_rate
+    FROM monthly_data md
+    LEFT JOIN platform_locations pl ON TRIM(md.platform) = pl.platform
+    GROUP BY md.platform, pl.unique_locations
+    ORDER BY md.platform
     """
     
     try:
@@ -306,9 +328,21 @@ def get_chain_segmentation():
     
     query = """
     WITH chain_sizes AS (
-        SELECT 
+        SELECT
+            chain,
+            COUNT(DISTINCT CONCAT(chain, b_name)) as location_count
+        FROM `merchant_portal_export.chargeback_orders_enriched`
+        WHERE order_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+            AND is_loop_enabled = true
+            AND loop_raised_timestamp IS NOT NULL
+            AND chain IS NOT NULL
+            AND chain != ''
+        GROUP BY chain
+    ),
+    -- Get volume from chargeback_split_summary for ranking purposes
+    chain_volumes AS (
+        SELECT
             sm.chain,
-            COUNT(DISTINCT cs.slug) as location_count,
             SUM(COALESCE(cs.enabled_customer_refunds, 0)) as total_volume
         FROM `merchant_portal_export.chargeback_split_summary` cs
         JOIN `restaurant_aggregate_metrics.slug_am_mapping` sm ON cs.slug = sm.slug
@@ -318,19 +352,20 @@ def get_chain_segmentation():
         GROUP BY sm.chain
     ),
     ranked_chains AS (
-        SELECT 
-            chain,
-            location_count,
-            total_volume,
-            ROW_NUMBER() OVER (ORDER BY location_count DESC) as rank_by_locations
-        FROM chain_sizes
+        SELECT
+            cs.chain,
+            cs.location_count,
+            COALESCE(cv.total_volume, 0) as total_volume,
+            ROW_NUMBER() OVER (ORDER BY cs.location_count DESC) as rank_by_locations
+        FROM chain_sizes cs
+        LEFT JOIN chain_volumes cv ON cs.chain = cv.chain
     )
-    SELECT 
+    SELECT
         chain,
         location_count,
         total_volume,
         rank_by_locations,
-        CASE 
+        CASE
             WHEN rank_by_locations <= 15 THEN 'P0'
             WHEN rank_by_locations <= 40 THEN 'P1'
             WHEN rank_by_locations <= 70 THEN 'P2'
@@ -372,7 +407,7 @@ if all([mtd_data, month_1_data, month_2_data, month_3_data]):
             row = {
                 'Period': data['month'],
                 'Chains (chain)': f"{data['chains']:,}",
-                'Locations (b_name_id)': f"{data['unique_locations']:,}",
+                'Locations (chain + b_name)': f"{data['unique_locations']:,}",
                 'DoorDash (slug)': f"{data['dd_locations']:,}",
                 'UberEats (slug)': f"{data['ue_locations']:,}",
                 'Grubhub (slug)': f"{data['gh_locations']:,}",
@@ -435,7 +470,7 @@ if all([mtd_data, month_1_data, month_2_data, month_3_data]):
         for _, row in df.iterrows():
             formatted_data.append({
                 'Platform': row['platform'],
-                'Locations (b_name_id)': f"{int(row['unique_locations']):,}",
+                'Locations (chain + b_name)': f"{int(row['unique_locations']):,}",
                 'Slugs (slug)': f"{int(row['slug_count']):,}",
                 'Disputed': f"{int(row['total_disputed']):,}",
                 'Won': f"{int(row['disputes_won']):,}",
@@ -622,21 +657,23 @@ if not segmentation_df.empty:
         
         query = f"""
         WITH chain_segments AS (
-            SELECT 
-                sm.chain,
-                COUNT(DISTINCT sm.slug) as location_count,
-                ROW_NUMBER() OVER (ORDER BY COUNT(DISTINCT sm.slug) DESC) as rank_by_locations
-            FROM `merchant_portal_export.chargeback_split_summary` cs
-            JOIN `restaurant_aggregate_metrics.slug_am_mapping` sm ON cs.slug = sm.slug
-            WHERE cs.chargeback_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
-                AND sm.chain IS NOT NULL
-                AND sm.chain != ''
-            GROUP BY sm.chain
+            SELECT
+                chain,
+                COUNT(DISTINCT CONCAT(chain, b_name)) as location_count,
+                ROW_NUMBER() OVER (ORDER BY COUNT(DISTINCT CONCAT(chain, b_name)) DESC) as rank_by_locations
+            FROM `merchant_portal_export.chargeback_orders_enriched`
+            WHERE order_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+                AND is_loop_enabled = true
+                AND loop_raised_timestamp IS NOT NULL
+                AND chain IS NOT NULL
+                AND chain != ''
+            GROUP BY chain
         ),
         segmented_chains AS (
-            SELECT 
+            SELECT
                 chain,
-                CASE 
+                location_count,
+                CASE
                     WHEN rank_by_locations <= 15 THEN 'P0'
                     WHEN rank_by_locations <= 40 THEN 'P1'
                     WHEN rank_by_locations <= 70 THEN 'P2'
@@ -646,12 +683,12 @@ if not segmentation_df.empty:
             FROM chain_segments
         ),
         mtd_performance AS (
-            SELECT 
+            SELECT
                 sc.segment,
                 COUNT(DISTINCT sm.chain) as chain_count,
-                COUNT(DISTINCT sm.slug) as location_count,
+                SUM(sc.location_count) as total_locations,
                 SUM(COALESCE(cs.enabled_won_disputes, 0)) as total_won,
-                SUM(CASE 
+                SUM(CASE
                     WHEN cs.external_status IN ('ACCEPTED', 'DENIED')
                     THEN COALESCE(cs.enabled_customer_refunds, 0)
                     ELSE 0
@@ -659,19 +696,19 @@ if not segmentation_df.empty:
                 COUNT(*) as dispute_count
             FROM `merchant_portal_export.chargeback_split_summary` cs
             JOIN `restaurant_aggregate_metrics.slug_am_mapping` sm ON cs.slug = sm.slug
-            JOIN segmented_chains sc ON sm.chain = sc.chain
+            JOIN (SELECT DISTINCT chain, segment, location_count FROM segmented_chains) sc ON sm.chain = sc.chain
             WHERE cs.chargeback_date BETWEEN '{current_month_start}' AND '{current_month_end}'
             GROUP BY sc.segment
         )
-        SELECT 
+        SELECT
             segment,
             chain_count,
-            location_count,
+            total_locations as location_count,
             total_won,
             total_settled,
             dispute_count,
             ROUND(SAFE_DIVIDE(total_won, NULLIF(total_settled, 0)) * 100, 2) as win_rate,
-            ROUND(SAFE_DIVIDE(total_won, NULLIF(location_count, 0)), 2) as avg_per_location
+            ROUND(SAFE_DIVIDE(total_won, NULLIF(total_locations, 0)), 2) as avg_per_location
         FROM mtd_performance
         ORDER BY segment
         """
@@ -760,19 +797,19 @@ def get_segment_monthly_data(start_date, end_date, month_label, segment):
         FROM chain_segments
     ),
     monthly_data AS (
-        SELECT 
+        SELECT
             sm.chain,
             sm.slug,
             sm.b_name_id,
             cs.platform,
             cs.external_status,
             COALESCE(cs.enabled_won_disputes, 0) as won_amount,
-            CASE 
+            CASE
                 WHEN cs.external_status IN ('ACCEPTED', 'DENIED')
                 THEN COALESCE(cs.enabled_customer_refunds, 0)
                 ELSE 0
             END as settled_amount,
-            CASE 
+            CASE
                 WHEN cs.external_status = 'ACCEPTED' THEN 'won'
                 WHEN cs.external_status = 'DENIED' THEN 'lost'
                 ELSE 'pending'
@@ -783,10 +820,21 @@ def get_segment_monthly_data(start_date, end_date, month_label, segment):
         WHERE cs.chargeback_date BETWEEN '{start_date}' AND '{end_date}'
             AND sc.segment = '{segment}'
     ),
+    -- Get location count for the segment from chargeback_orders_enriched
+    segment_locations AS (
+        SELECT
+            COUNT(DISTINCT CONCAT(coe.chain, coe.b_name)) as unique_locations
+        FROM `merchant_portal_export.chargeback_orders_enriched` coe
+        JOIN (
+            SELECT DISTINCT chain FROM segmented_chains WHERE segment = '{segment}'
+        ) sc ON coe.chain = sc.chain
+        WHERE coe.order_date BETWEEN '{start_date}' AND '{end_date}'
+            AND coe.is_loop_enabled = true
+            AND coe.loop_raised_timestamp IS NOT NULL
+    ),
     platform_metrics AS (
-        SELECT 
+        SELECT
             chain,
-            COUNT(DISTINCT b_name_id) as unique_locations,
             COUNT(DISTINCT CASE WHEN TRIM(platform) = 'Doordash' THEN slug END) as dd_locations,
             COUNT(DISTINCT CASE WHEN TRIM(platform) = 'UberEats' THEN slug END) as ue_locations,
             COUNT(DISTINCT CASE WHEN TRIM(platform) = 'Grubhub' THEN slug END) as gh_locations,
@@ -799,9 +847,9 @@ def get_segment_monthly_data(start_date, end_date, month_label, segment):
         FROM monthly_data
         GROUP BY chain
     )
-    SELECT 
+    SELECT
         COUNT(DISTINCT chain) as chain_count,
-        SUM(unique_locations) as unique_locations,
+        (SELECT unique_locations FROM segment_locations) as unique_locations,
         SUM(dd_locations) as dd_locations,
         SUM(ue_locations) as ue_locations,
         SUM(gh_locations) as gh_locations,
@@ -880,7 +928,7 @@ for segment in segments:
                 row = {
                     'Period': data['month'],
                     'Chains (chain)': f"{data['chains']:,}",
-                    'Locations (b_name_id)': f"{data['unique_locations']:,}",
+                    'Locations (chain + b_name)': f"{data['unique_locations']:,}",
                     'DoorDash (slug)': f"{data['dd_locations']:,}",
                     'UberEats (slug)': f"{data['ue_locations']:,}",
                     'Grubhub (slug)': f"{data['gh_locations']:,}",
@@ -942,21 +990,22 @@ for segment in segments:
             # Get chain-level data for this segment
             chain_query = f"""
             WITH chain_segments AS (
-                SELECT 
-                    sm.chain,
-                    COUNT(DISTINCT sm.slug) as location_count,
-                    ROW_NUMBER() OVER (ORDER BY COUNT(DISTINCT sm.slug) DESC) as rank_by_locations
-                FROM `merchant_portal_export.chargeback_split_summary` cs
-                JOIN `restaurant_aggregate_metrics.slug_am_mapping` sm ON cs.slug = sm.slug
-                WHERE cs.chargeback_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
-                    AND sm.chain IS NOT NULL
-                    AND sm.chain != ''
-                GROUP BY sm.chain
+                SELECT
+                    chain,
+                    COUNT(DISTINCT CONCAT(chain, b_name)) as location_count,
+                    ROW_NUMBER() OVER (ORDER BY COUNT(DISTINCT CONCAT(chain, b_name)) DESC) as rank_by_locations
+                FROM `merchant_portal_export.chargeback_orders_enriched`
+                WHERE order_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+                    AND is_loop_enabled = true
+                    AND loop_raised_timestamp IS NOT NULL
+                    AND chain IS NOT NULL
+                    AND chain != ''
+                GROUP BY chain
             ),
             segmented_chains AS (
-                SELECT 
+                SELECT
                     chain,
-                    CASE 
+                    CASE
                         WHEN rank_by_locations <= 15 THEN 'P0'
                         WHEN rank_by_locations <= 40 THEN 'P1'
                         WHEN rank_by_locations <= 70 THEN 'P2'
