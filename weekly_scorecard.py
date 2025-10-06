@@ -46,25 +46,27 @@ except Exception as e:
 st.title("📊 Weekly Recovery Scorecard")
 st.markdown("*Executive health monitoring dashboard with P0-P4 chain segmentation*")
 
-# Get current date info for MTD calculation
+# Get current date info for last 30 and 90 days calculation
 today = date.today()
-current_month_start = date(today.year, today.month, 1)
+current_month_start = today - timedelta(days=30)
 current_month_end = today
+last_90_start = today - timedelta(days=90)
+last_90_end = today
 
 # Calculate previous months
 def get_month_dates(months_back):
     """Get start and end dates for a month N months back"""
     year = today.year
     month = today.month - months_back
-    
+
     while month <= 0:
         month += 12
         year -= 1
-    
+
     start = date(year, month, 1)
     last_day = calendar.monthrange(year, month)[1]
     end = date(year, month, last_day)
-    
+
     return start, end
 
 # Get dates for last 3 complete months
@@ -88,6 +90,7 @@ def get_monthly_overview(start_date, end_date, month_label):
             COALESCE(cs.enabled_won_disputes, 0) as won_amount,
             CASE
                 WHEN cs.external_status IN ('ACCEPTED', 'DENIED')
+                    AND UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%'
                 THEN COALESCE(cs.enabled_customer_refunds, 0)
                 ELSE 0
             END as settled_amount,
@@ -266,6 +269,7 @@ def get_platform_breakdown(start_date, end_date, month_label):
             COALESCE(cs.enabled_won_disputes, 0) as won_amount,
             CASE
                 WHEN cs.external_status IN ('ACCEPTED', 'DENIED')
+                    AND UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%'
                 THEN COALESCE(cs.enabled_customer_refunds, 0)
                 ELSE 0
             END as settled_amount,
@@ -383,25 +387,26 @@ def get_chain_segmentation():
         return pd.DataFrame()
 
 # Header with date context
-st.markdown(f"**Report Date**: {today.strftime('%B %d, %Y')} | **MTD Period**: {current_month_start.strftime('%b %d')} - {current_month_end.strftime('%b %d')}")
+st.markdown(f"**Report Date**: {today.strftime('%B %d, %Y')} | **Last 30 Days**: {current_month_start.strftime('%b %d')} - {current_month_end.strftime('%b %d')}")
 st.markdown("---")
 
 # Section 1: Overall Monthly Performance
 st.header("📈 Overall Monthly Performance")
 
-# Fetch data for all 4 periods
+# Fetch data for all 5 periods
 with st.spinner("Loading monthly overview data..."):
-    mtd_data = get_monthly_overview(current_month_start, current_month_end, f"MTD ({current_month_start.strftime('%b')})")
+    mtd_data = get_monthly_overview(current_month_start, current_month_end, "Last 30 Days")
+    last_90_data = get_monthly_overview(last_90_start, last_90_end, "Last 90 Days")
     month_1_data = get_monthly_overview(last_month_start, last_month_end, last_month_start.strftime('%B'))
     month_2_data = get_monthly_overview(month_2_start, month_2_end, month_2_start.strftime('%B'))
     month_3_data = get_monthly_overview(month_3_start, month_3_end, month_3_start.strftime('%B'))
 
 # Create a comprehensive table view
-if all([mtd_data, month_1_data, month_2_data, month_3_data]):
+if all([mtd_data, last_90_data, month_1_data, month_2_data, month_3_data]):
     # Prepare data for table
     table_data = []
-    
-    for data in [mtd_data, month_1_data, month_2_data, month_3_data]:
+
+    for data in [mtd_data, last_90_data, month_1_data, month_2_data, month_3_data]:
         if data:
             recovered_per_location = data['recovered'] / data['unique_locations'] if data['unique_locations'] > 0 else 0
             row = {
@@ -431,10 +436,12 @@ if all([mtd_data, month_1_data, month_2_data, month_3_data]):
         'border-color': 'white'
     })
     
-    # Highlight MTD row
+    # Highlight Last 30 Days and Last 90 Days rows
     def highlight_mtd(row):
-        if 'MTD' in row['Period']:
+        if 'Last 30 Days' in row['Period']:
             return ['background-color: #ffe6e6'] * len(row)
+        elif 'Last 90 Days' in row['Period']:
+            return ['background-color: #e6f2ff'] * len(row)
         else:
             return [''] * len(row)
     
@@ -447,16 +454,18 @@ if all([mtd_data, month_1_data, month_2_data, month_3_data]):
     st.subheader("📱 Platform-Specific Performance")
     
     # Fetch platform data for all periods
-    platform_mtd = get_platform_breakdown(current_month_start, current_month_end, f"MTD ({current_month_start.strftime('%b')})")
+    platform_mtd = get_platform_breakdown(current_month_start, current_month_end, "Last 30 Days")
+    platform_90d = get_platform_breakdown(last_90_start, last_90_end, "Last 90 Days")
     platform_m1 = get_platform_breakdown(last_month_start, last_month_end, last_month_start.strftime('%B'))
     platform_m2 = get_platform_breakdown(month_2_start, month_2_end, month_2_start.strftime('%B'))
     platform_m3 = get_platform_breakdown(month_3_start, month_3_end, month_3_start.strftime('%B'))
-    
+
     # Create tabs for each time period
-    tab1, tab2, tab3, tab4 = st.tabs([f"MTD ({current_month_start.strftime('%b')})", 
-                                       last_month_start.strftime('%B'),
-                                       month_2_start.strftime('%B'),
-                                       month_3_start.strftime('%B')])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Last 30 Days",
+                                             "Last 90 Days",
+                                             last_month_start.strftime('%B'),
+                                             month_2_start.strftime('%B'),
+                                             month_3_start.strftime('%B')])
     
     def format_platform_table(df, period_label):
         if df.empty:
@@ -485,23 +494,29 @@ if all([mtd_data, month_1_data, month_2_data, month_3_data]):
     
     with tab1:
         if not platform_mtd.empty:
-            st.dataframe(format_platform_table(platform_mtd, "MTD"), use_container_width=True, hide_index=True)
+            st.dataframe(format_platform_table(platform_mtd, "Last 30 Days"), use_container_width=True, hide_index=True)
         else:
-            st.info("No data available for MTD")
-    
+            st.info("No data available for Last 30 Days")
+
     with tab2:
+        if not platform_90d.empty:
+            st.dataframe(format_platform_table(platform_90d, "Last 90 Days"), use_container_width=True, hide_index=True)
+        else:
+            st.info("No data available for Last 90 Days")
+
+    with tab3:
         if not platform_m1.empty:
             st.dataframe(format_platform_table(platform_m1, last_month_start.strftime('%B')), use_container_width=True, hide_index=True)
         else:
             st.info(f"No data available for {last_month_start.strftime('%B')}")
-    
-    with tab3:
+
+    with tab4:
         if not platform_m2.empty:
             st.dataframe(format_platform_table(platform_m2, month_2_start.strftime('%B')), use_container_width=True, hide_index=True)
         else:
             st.info(f"No data available for {month_2_start.strftime('%B')}")
-    
-    with tab4:
+
+    with tab5:
         if not platform_m3.empty:
             st.dataframe(format_platform_table(platform_m3, month_3_start.strftime('%B')), use_container_width=True, hide_index=True)
         else:
@@ -509,7 +524,7 @@ if all([mtd_data, month_1_data, month_2_data, month_3_data]):
     
     # Chain Movement Section (NEW)
     st.markdown("---")
-    st.subheader("🔄 Chain Movement (MTD vs Previous Month)")
+    st.subheader("🔄 Chain Movement (Last 30 Days vs Previous Month)")
     
     # Get chain movement data
     chains_movement = get_chains_movement(current_month_start, current_month_end, last_month_start, last_month_end)
@@ -569,22 +584,22 @@ if all([mtd_data, month_1_data, month_2_data, month_3_data]):
     with col1:
         mtd_vs_last = ((mtd_data['win_rate'] - month_1_data['win_rate']) / month_1_data['win_rate'] * 100) if month_1_data['win_rate'] > 0 else 0
         st.metric(
-            "MTD vs Last Month (Win Rate)",
+            "L30D vs Last Month (Win Rate)",
             f"{mtd_data['win_rate']:.1f}%",
             f"{mtd_vs_last:+.1f}%"
         )
-    
+
     with col2:
         mtd_vol_vs_last = ((mtd_data['recovered'] - month_1_data['recovered']) / month_1_data['recovered'] * 100) if month_1_data['recovered'] > 0 else 0
         st.metric(
-            "MTD vs Last Month (Recovery)",
+            "L30D vs Last Month (Recovery)",
             f"${mtd_data['recovered']/1000:.1f}K",
             f"{mtd_vol_vs_last:+.1f}%"
         )
     
     with col3:
-        total_disputes = sum([d['disputed'] for d in [mtd_data, month_1_data, month_2_data, month_3_data]])
-        st.metric("Total Disputes (4 months)", f"{total_disputes:,}")
+        total_disputes = sum([d['disputed'] for d in [mtd_data, last_90_data, month_1_data, month_2_data, month_3_data]])
+        st.metric("Total Disputes (5 periods)", f"{total_disputes:,}")
     
     with col4:
         total_pending = mtd_data['pending']
@@ -643,8 +658,8 @@ if all([mtd_data, month_1_data, month_2_data, month_3_data]):
 
 st.markdown("---")
 
-# Section 2: P0-P4 Segment Performance (Current Month)
-st.header("🎯 Segment Performance (MTD)")
+# Section 2: P0-P4 Segment Performance (Last 30 Days)
+st.header("🎯 Segment Performance (Last 30 Days)")
 
 # Get segmentation data
 segmentation_df = get_chain_segmentation()
@@ -653,7 +668,7 @@ if not segmentation_df.empty:
     # Get current month performance by segment
     @st.cache_data(ttl=3600)
     def get_segment_performance():
-        """Get MTD performance by segment"""
+        """Get Last 30 Days performance by segment"""
         
         query = f"""
         WITH chain_segments AS (
@@ -686,7 +701,15 @@ if not segmentation_df.empty:
             SELECT
                 sc.segment,
                 COUNT(DISTINCT sm.chain) as chain_count,
-                SUM(sc.location_count) as total_locations,
+                (
+                    SELECT COUNT(DISTINCT CONCAT(coe.chain, coe.b_name))
+                    FROM `merchant_portal_export.chargeback_orders_enriched` coe
+                    JOIN (SELECT DISTINCT chain FROM segmented_chains WHERE segment = sc.segment) seg_chains
+                        ON coe.chain = seg_chains.chain
+                    WHERE coe.order_date BETWEEN '{current_month_start}' AND '{current_month_end}'
+                        AND coe.is_loop_enabled = true
+                        AND coe.loop_raised_timestamp IS NOT NULL
+                ) as total_locations,
                 SUM(COALESCE(cs.enabled_won_disputes, 0)) as total_won,
                 SUM(CASE
                     WHEN cs.external_status IN ('ACCEPTED', 'DENIED')
@@ -806,6 +829,7 @@ def get_segment_monthly_data(start_date, end_date, month_label, segment):
             COALESCE(cs.enabled_won_disputes, 0) as won_amount,
             CASE
                 WHEN cs.external_status IN ('ACCEPTED', 'DENIED')
+                    AND UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%'
                 THEN COALESCE(cs.enabled_customer_refunds, 0)
                 ELSE 0
             END as settled_amount,
@@ -913,7 +937,7 @@ for segment in segments:
     
     with st.spinner(f"Loading {segment} data..."):
         # Fetch data for all periods for this segment
-        seg_mtd = get_segment_monthly_data(current_month_start, current_month_end, f"MTD ({current_month_start.strftime('%b')})", segment)
+        seg_mtd = get_segment_monthly_data(current_month_start, current_month_end, "Last 30 Days", segment)
         seg_m1 = get_segment_monthly_data(last_month_start, last_month_end, last_month_start.strftime('%B'), segment)
         seg_m2 = get_segment_monthly_data(month_2_start, month_2_end, month_2_start.strftime('%B'), segment)
         seg_m3 = get_segment_monthly_data(month_3_start, month_3_end, month_3_start.strftime('%B'), segment)
@@ -952,9 +976,9 @@ for segment in segments:
             'border-color': 'white'
         })
         
-        # Highlight MTD row
+        # Highlight Last 30 Days row
         def highlight_seg_mtd(row):
-            if 'MTD' in row['Period']:
+            if 'Last 30 Days' in row['Period']:
                 return [f'background-color: {segment_colors[segment]}40'] * len(row)
             else:
                 return [''] * len(row)
@@ -969,19 +993,19 @@ for segment in segments:
         with col1:
             mtd_vs_last_wr = ((seg_mtd['win_rate'] - seg_m1['win_rate']) / seg_m1['win_rate'] * 100) if seg_m1['win_rate'] > 0 else 0
             st.metric(
-                f"{segment} MTD vs Last Month (Win Rate)",
+                f"{segment} L30D vs Last Month (Win Rate)",
                 f"{seg_mtd['win_rate']:.1f}%",
                 f"{mtd_vs_last_wr:+.1f}%"
             )
-        
+
         with col2:
             mtd_vs_last_vol = ((seg_mtd['recovered'] - seg_m1['recovered']) / seg_m1['recovered'] * 100) if seg_m1['recovered'] > 0 else 0
             st.metric(
-                f"{segment} MTD vs Last Month (Recovery)",
+                f"{segment} L30D vs Last Month (Recovery)",
                 f"${seg_mtd['recovered']/1000:.1f}K",
                 f"{mtd_vs_last_vol:+.1f}%"
             )
-        
+
         with col3:
             st.metric(f"{segment} Current Pending", f"{seg_mtd['pending']:,}")
         
@@ -1022,8 +1046,9 @@ for segment in segments:
                     cs.chargeback_date,
                     cs.external_status,
                     COALESCE(cs.enabled_won_disputes, 0) as won_amount,
-                    CASE 
+                    CASE
                         WHEN cs.external_status IN ('ACCEPTED', 'DENIED')
+                            AND UPPER(COALESCE(cs.error_category, '')) LIKE '%INACCURATE%'
                         THEN COALESCE(cs.enabled_customer_refunds, 0)
                         ELSE 0
                     END as settled_amount,
@@ -1106,7 +1131,7 @@ for segment in segments:
                 
                 if not chain_df.empty:
                     # Create tabs for each period
-                    tab1, tab2, tab3, tab4 = st.tabs([f"MTD ({current_month_start.strftime('%b')})", 
+                    tab1, tab2, tab3, tab4 = st.tabs(["Last 30 Days",
                                                       last_month_start.strftime('%B'),
                                                       month_2_start.strftime('%B'),
                                                       month_3_start.strftime('%B')])
