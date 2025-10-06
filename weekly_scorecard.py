@@ -46,6 +46,83 @@ except Exception as e:
 st.title("📊 Weekly Recovery Scorecard")
 st.markdown("*Executive health monitoring dashboard with P0-P4 chain segmentation*")
 
+# Add filters in sidebar
+st.sidebar.header("🔍 Filters")
+
+# Get available chains, platforms, and locations for filters
+@st.cache_data(ttl=3600)
+def get_filter_options():
+    """Get unique chains, platforms, and b_names for filters"""
+
+    chains_query = """
+    SELECT DISTINCT chain
+    FROM `restaurant_aggregate_metrics.slug_am_mapping`
+    WHERE chain IS NOT NULL AND chain != ''
+    ORDER BY chain
+    """
+
+    platforms_query = """
+    SELECT DISTINCT platform
+    FROM `merchant_portal_export.chargeback_split_summary`
+    WHERE platform IS NOT NULL
+    ORDER BY platform
+    """
+
+    bnames_query = """
+    SELECT DISTINCT b_name
+    FROM `restaurant_aggregate_metrics.slug_am_mapping`
+    WHERE b_name IS NOT NULL AND b_name != ''
+    ORDER BY b_name
+    LIMIT 1000
+    """
+
+    try:
+        chains_df = pandas_gbq.read_gbq(chains_query, project_id=PROJECT_ID, credentials=credentials)
+        platforms_df = pandas_gbq.read_gbq(platforms_query, project_id=PROJECT_ID, credentials=credentials)
+        bnames_df = pandas_gbq.read_gbq(bnames_query, project_id=PROJECT_ID, credentials=credentials)
+
+        return (
+            chains_df['chain'].tolist() if not chains_df.empty else [],
+            platforms_df['platform'].tolist() if not platforms_df.empty else [],
+            bnames_df['b_name'].tolist() if not bnames_df.empty else []
+        )
+    except Exception as e:
+        st.error(f"Error loading filter options: {e}")
+        return [], [], []
+
+# Get filter options
+chains_list, platforms_list, bnames_list = get_filter_options()
+
+# Create filter widgets
+selected_chains = st.sidebar.multiselect(
+    "Select Chain(s)",
+    options=["All"] + chains_list,
+    default=["All"],
+    help="Filter by restaurant chain"
+)
+
+selected_platforms = st.sidebar.multiselect(
+    "Select Platform(s)",
+    options=["All"] + platforms_list,
+    default=["All"],
+    help="Filter by delivery platform"
+)
+
+selected_bnames = st.sidebar.multiselect(
+    "Select Location(s)",
+    options=["All"] + bnames_list,
+    default=["All"],
+    help="Filter by location name (b_name)"
+)
+
+# Process filter selections
+filter_chains = None if "All" in selected_chains else selected_chains
+filter_platforms = None if "All" in selected_platforms else selected_platforms
+filter_bnames = None if "All" in selected_bnames else selected_bnames
+
+st.sidebar.markdown("---")
+st.sidebar.caption("Filters will be applied to all dashboard sections")
+
 # Get current date info for last 30 and 90 days calculation
 today = date.today()
 current_month_start = today - timedelta(days=30)
@@ -75,9 +152,29 @@ month_2_start, month_2_end = get_month_dates(2)
 month_3_start, month_3_end = get_month_dates(3)
 
 @st.cache_data(ttl=3600)
-def get_monthly_overview(start_date, end_date, month_label):
+def get_monthly_overview(start_date, end_date, month_label, filter_chains=None, filter_platforms=None, filter_bnames=None):
     """Get monthly overview metrics including dispute counts"""
-    
+
+    # Build filter conditions
+    filter_conditions = []
+    filter_conditions_coe = []  # For chargeback_orders_enriched table
+
+    if filter_chains:
+        chains_str = "', '".join(filter_chains)
+        filter_conditions.append(f"sm.chain IN ('{chains_str}')")
+        filter_conditions_coe.append(f"chain IN ('{chains_str}')")
+    if filter_platforms:
+        platforms_str = "', '".join(filter_platforms)
+        filter_conditions.append(f"TRIM(cs.platform) IN ('{platforms_str}')")
+        filter_conditions_coe.append(f"TRIM(platform) IN ('{platforms_str}')")
+    if filter_bnames:
+        bnames_str = "', '".join(filter_bnames)
+        filter_conditions.append(f"sm.b_name IN ('{bnames_str}')")
+        filter_conditions_coe.append(f"b_name IN ('{bnames_str}')")
+
+    filter_clause = " AND " + " AND ".join(filter_conditions) if filter_conditions else ""
+    filter_clause_coe = " AND " + " AND ".join(filter_conditions_coe) if filter_conditions_coe else ""
+
     query = f"""
     WITH monthly_data AS (
         SELECT
@@ -97,13 +194,15 @@ def get_monthly_overview(start_date, end_date, month_label):
             CASE
                 WHEN cs.external_status = 'ACCEPTED' THEN 'won'
                 WHEN cs.external_status = 'DENIED' THEN 'lost'
-                ELSE 'pending'
+                WHEN cs.external_status IN ('IN_PROGRESS', 'TO_BE_RAISED') THEN 'pending'
+                ELSE 'other'
             END as dispute_status
         FROM `merchant_portal_export.chargeback_split_summary` cs
         JOIN `restaurant_aggregate_metrics.slug_am_mapping` sm ON cs.slug = sm.slug
         WHERE cs.chargeback_date BETWEEN '{start_date}' AND '{end_date}'
             AND sm.chain IS NOT NULL
             AND sm.chain != ''
+            {filter_clause}
     ),
     -- Get location count from chargeback_orders_enriched table
     location_counts AS (
@@ -113,6 +212,7 @@ def get_monthly_overview(start_date, end_date, month_label):
         WHERE order_date BETWEEN '{start_date}' AND '{end_date}'
             AND is_loop_enabled = true
             AND loop_raised_timestamp IS NOT NULL
+            {filter_clause_coe}
     ),
     platform_metrics AS (
         SELECT
@@ -125,6 +225,9 @@ def get_monthly_overview(start_date, end_date, month_label):
             SUM(CASE WHEN dispute_status = 'won' THEN 1 ELSE 0 END) as disputes_won,
             SUM(CASE WHEN dispute_status = 'lost' THEN 1 ELSE 0 END) as disputes_lost,
             SUM(CASE WHEN dispute_status = 'pending' THEN 1 ELSE 0 END) as disputes_pending,
+            SUM(CASE WHEN external_status = 'IN_PROGRESS' THEN 1 ELSE 0 END) as disputes_in_progress,
+            SUM(CASE WHEN external_status = 'TO_BE_RAISED' THEN 1 ELSE 0 END) as disputes_to_be_raised,
+            SUM(CASE WHEN external_status = 'EXPIRED' THEN 1 ELSE 0 END) as disputes_expired,
             SUM(won_amount) as total_won,
             SUM(settled_amount) as total_settled
         FROM monthly_data
@@ -140,6 +243,9 @@ def get_monthly_overview(start_date, end_date, month_label):
         SUM(disputes_won) as disputes_won,
         SUM(disputes_lost) as disputes_lost,
         SUM(disputes_pending) as disputes_pending,
+        SUM(disputes_in_progress) as disputes_in_progress,
+        SUM(disputes_to_be_raised) as disputes_to_be_raised,
+        SUM(disputes_expired) as disputes_expired,
         SUM(total_won) as total_recovered,
         SUM(total_settled) as total_settled,
         ROUND(SAFE_DIVIDE(SUM(total_won), NULLIF(SUM(total_settled), 0)) * 100, 2) as win_rate,
@@ -167,6 +273,9 @@ def get_monthly_overview(start_date, end_date, month_label):
                 'won': int(row['disputes_won']) if pd.notna(row['disputes_won']) else 0,
                 'lost': int(row['disputes_lost']) if pd.notna(row['disputes_lost']) else 0,
                 'pending': int(row['disputes_pending']) if pd.notna(row['disputes_pending']) else 0,
+                'in_progress': int(row['disputes_in_progress']) if pd.notna(row['disputes_in_progress']) else 0,
+                'to_be_raised': int(row['disputes_to_be_raised']) if pd.notna(row['disputes_to_be_raised']) else 0,
+                'expired': int(row['disputes_expired']) if pd.notna(row['disputes_expired']) else 0,
                 'recovered': float(row['total_recovered']) if pd.notna(row['total_recovered']) else 0,
                 'settled': float(row['total_settled']) if pd.notna(row['total_settled']) else 0,
                 'win_rate': float(row['win_rate']) if pd.notna(row['win_rate']) else 0,
@@ -254,8 +363,22 @@ def get_chains_movement(current_start, current_end, previous_start, previous_end
         return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
-def get_platform_breakdown(start_date, end_date, month_label):
+def get_platform_breakdown(start_date, end_date, month_label, filter_chains=None, filter_platforms=None, filter_bnames=None):
     """Get platform-specific metrics"""
+
+    # Build filter conditions
+    filter_conditions = []
+    if filter_chains:
+        chains_str = "', '".join(filter_chains)
+        filter_conditions.append(f"sm.chain IN ('{chains_str}')")
+    if filter_platforms:
+        platforms_str = "', '".join(filter_platforms)
+        filter_conditions.append(f"TRIM(cs.platform) IN ('{platforms_str}')")
+    if filter_bnames:
+        bnames_str = "', '".join(filter_bnames)
+        filter_conditions.append(f"sm.b_name IN ('{bnames_str}')")
+
+    filter_clause = " AND " + " AND ".join(filter_conditions) if filter_conditions else ""
 
     query = f"""
     WITH monthly_data AS (
@@ -276,13 +399,15 @@ def get_platform_breakdown(start_date, end_date, month_label):
             CASE
                 WHEN cs.external_status = 'ACCEPTED' THEN 'won'
                 WHEN cs.external_status = 'DENIED' THEN 'lost'
-                ELSE 'pending'
+                WHEN cs.external_status IN ('IN_PROGRESS', 'TO_BE_RAISED') THEN 'pending'
+                ELSE 'other'
             END as dispute_status
         FROM `merchant_portal_export.chargeback_split_summary` cs
         JOIN `restaurant_aggregate_metrics.slug_am_mapping` sm ON cs.slug = sm.slug
         WHERE cs.chargeback_date BETWEEN '{start_date}' AND '{end_date}'
             AND sm.chain IS NOT NULL
             AND sm.chain != ''
+            {filter_clause}
     ),
     -- Get location counts per platform from chargeback_orders_enriched
     platform_locations AS (
@@ -303,6 +428,9 @@ def get_platform_breakdown(start_date, end_date, month_label):
         SUM(CASE WHEN md.dispute_status = 'won' THEN 1 ELSE 0 END) as disputes_won,
         SUM(CASE WHEN md.dispute_status = 'lost' THEN 1 ELSE 0 END) as disputes_lost,
         SUM(CASE WHEN md.dispute_status = 'pending' THEN 1 ELSE 0 END) as disputes_pending,
+        SUM(CASE WHEN md.external_status = 'IN_PROGRESS' THEN 1 ELSE 0 END) as disputes_in_progress,
+        SUM(CASE WHEN md.external_status = 'TO_BE_RAISED' THEN 1 ELSE 0 END) as disputes_to_be_raised,
+        SUM(CASE WHEN md.external_status = 'EXPIRED' THEN 1 ELSE 0 END) as disputes_expired,
         SUM(md.won_amount) as total_recovered,
         SUM(md.settled_amount) as total_settled,
         ROUND(SAFE_DIVIDE(SUM(md.won_amount), NULLIF(SUM(md.settled_amount), 0)) * 100, 2) as win_rate
@@ -395,11 +523,11 @@ st.header("📈 Overall Monthly Performance")
 
 # Fetch data for all 5 periods
 with st.spinner("Loading monthly overview data..."):
-    mtd_data = get_monthly_overview(current_month_start, current_month_end, "Last 30 Days")
-    last_90_data = get_monthly_overview(last_90_start, last_90_end, "Last 90 Days")
-    month_1_data = get_monthly_overview(last_month_start, last_month_end, last_month_start.strftime('%B'))
-    month_2_data = get_monthly_overview(month_2_start, month_2_end, month_2_start.strftime('%B'))
-    month_3_data = get_monthly_overview(month_3_start, month_3_end, month_3_start.strftime('%B'))
+    mtd_data = get_monthly_overview(current_month_start, current_month_end, "Last 30 Days", filter_chains, filter_platforms, filter_bnames)
+    last_90_data = get_monthly_overview(last_90_start, last_90_end, "Last 90 Days", filter_chains, filter_platforms, filter_bnames)
+    month_1_data = get_monthly_overview(last_month_start, last_month_end, last_month_start.strftime('%B'), filter_chains, filter_platforms, filter_bnames)
+    month_2_data = get_monthly_overview(month_2_start, month_2_end, month_2_start.strftime('%B'), filter_chains, filter_platforms, filter_bnames)
+    month_3_data = get_monthly_overview(month_3_start, month_3_end, month_3_start.strftime('%B'), filter_chains, filter_platforms, filter_bnames)
 
 # Create a comprehensive table view
 if all([mtd_data, last_90_data, month_1_data, month_2_data, month_3_data]):
@@ -420,6 +548,9 @@ if all([mtd_data, last_90_data, month_1_data, month_2_data, month_3_data]):
                 'Won': f"{data['won']:,}",
                 'Lost': f"{data['lost']:,}",
                 'Pending': f"{data['pending']:,}",
+                'In Progress': f"{data['in_progress']:,}",
+                'To Be Raised': f"{data['to_be_raised']:,}",
+                'Expired': f"{data['expired']:,}",
                 'Total Recovered (enabled_won_disputes)': f"${data['recovered']:,.0f}",
                 '$/Location': f"${recovered_per_location:.0f}",
                 'Win Rate': f"{data['win_rate']:.1f}%"
@@ -485,6 +616,9 @@ if all([mtd_data, last_90_data, month_1_data, month_2_data, month_3_data]):
                 'Won': f"{int(row['disputes_won']):,}",
                 'Lost': f"{int(row['disputes_lost']):,}",
                 'Pending': f"{int(row['disputes_pending']):,}",
+                'In Progress': f"{int(row['disputes_in_progress']):,}",
+                'To Be Raised': f"{int(row['disputes_to_be_raised']):,}",
+                'Expired': f"{int(row['disputes_expired']):,}",
                 'Total Recovered (enabled_won_disputes)': f"${row['total_recovered']:,.0f}",
                 '$/Location': f"${row['recovered_per_location']:.0f}",
                 'Win Rate': f"{row['win_rate']:.1f}%"
@@ -836,7 +970,8 @@ def get_segment_monthly_data(start_date, end_date, month_label, segment):
             CASE
                 WHEN cs.external_status = 'ACCEPTED' THEN 'won'
                 WHEN cs.external_status = 'DENIED' THEN 'lost'
-                ELSE 'pending'
+                WHEN cs.external_status IN ('IN_PROGRESS', 'TO_BE_RAISED') THEN 'pending'
+                ELSE 'other'
             END as dispute_status
         FROM `merchant_portal_export.chargeback_split_summary` cs
         JOIN `restaurant_aggregate_metrics.slug_am_mapping` sm ON cs.slug = sm.slug
@@ -866,6 +1001,9 @@ def get_segment_monthly_data(start_date, end_date, month_label, segment):
             SUM(CASE WHEN dispute_status = 'won' THEN 1 ELSE 0 END) as disputes_won,
             SUM(CASE WHEN dispute_status = 'lost' THEN 1 ELSE 0 END) as disputes_lost,
             SUM(CASE WHEN dispute_status = 'pending' THEN 1 ELSE 0 END) as disputes_pending,
+            SUM(CASE WHEN external_status = 'IN_PROGRESS' THEN 1 ELSE 0 END) as disputes_in_progress,
+            SUM(CASE WHEN external_status = 'TO_BE_RAISED' THEN 1 ELSE 0 END) as disputes_to_be_raised,
+            SUM(CASE WHEN external_status = 'EXPIRED' THEN 1 ELSE 0 END) as disputes_expired,
             SUM(won_amount) as total_won,
             SUM(settled_amount) as total_settled
         FROM monthly_data
@@ -881,6 +1019,9 @@ def get_segment_monthly_data(start_date, end_date, month_label, segment):
         SUM(disputes_won) as disputes_won,
         SUM(disputes_lost) as disputes_lost,
         SUM(disputes_pending) as disputes_pending,
+        SUM(disputes_in_progress) as disputes_in_progress,
+        SUM(disputes_to_be_raised) as disputes_to_be_raised,
+        SUM(disputes_expired) as disputes_expired,
         SUM(total_won) as total_recovered,
         SUM(total_settled) as total_settled,
         ROUND(SAFE_DIVIDE(SUM(total_won), NULLIF(SUM(total_settled), 0)) * 100, 2) as win_rate
@@ -902,6 +1043,9 @@ def get_segment_monthly_data(start_date, end_date, month_label, segment):
                 'won': int(row['disputes_won']) if pd.notna(row['disputes_won']) else 0,
                 'lost': int(row['disputes_lost']) if pd.notna(row['disputes_lost']) else 0,
                 'pending': int(row['disputes_pending']) if pd.notna(row['disputes_pending']) else 0,
+                'in_progress': int(row['disputes_in_progress']) if pd.notna(row['disputes_in_progress']) else 0,
+                'to_be_raised': int(row['disputes_to_be_raised']) if pd.notna(row['disputes_to_be_raised']) else 0,
+                'expired': int(row['disputes_expired']) if pd.notna(row['disputes_expired']) else 0,
                 'recovered': float(row['total_recovered']) if pd.notna(row['total_recovered']) else 0,
                 'settled': float(row['total_settled']) if pd.notna(row['total_settled']) else 0,
                 'win_rate': float(row['win_rate']) if pd.notna(row['win_rate']) else 0
@@ -960,6 +1104,9 @@ for segment in segments:
                     'Won': f"{data['won']:,}",
                     'Lost': f"{data['lost']:,}",
                     'Pending': f"{data['pending']:,}",
+                    'In Progress': f"{data['in_progress']:,}",
+                    'To Be Raised': f"{data['to_be_raised']:,}",
+                    'Expired': f"{data['expired']:,}",
                     'Total Recovered (enabled_won_disputes)': f"${data['recovered']:,.0f}",
                     '$/Location': f"${recovered_per_location:.0f}",
                     'Win Rate': f"{data['win_rate']:.1f}%"
@@ -1052,10 +1199,11 @@ for segment in segments:
                         THEN COALESCE(cs.enabled_customer_refunds, 0)
                         ELSE 0
                     END as settled_amount,
-                    CASE 
+                    CASE
                         WHEN cs.external_status = 'ACCEPTED' THEN 'won'
                         WHEN cs.external_status = 'DENIED' THEN 'lost'
-                        ELSE 'pending'
+                        WHEN cs.external_status IN ('IN_PROGRESS', 'TO_BE_RAISED') THEN 'pending'
+                        ELSE 'other'
                     END as dispute_status
                 FROM `merchant_portal_export.chargeback_split_summary` cs
                 JOIN `restaurant_aggregate_metrics.slug_am_mapping` sm ON cs.slug = sm.slug
